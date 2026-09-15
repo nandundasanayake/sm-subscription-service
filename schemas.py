@@ -97,6 +97,12 @@ class SubscriptionStatusUpdate(BaseModel):
         }
 
 
+class DummyWebhookPayload(BaseModel):
+    """Payload for POST /api/v1/webhooks/dummy — simulates the payment
+    gateway telling us a checkout session finished successfully."""
+    session_id: str = Field(..., min_length=1, examples=["dummy_3f9a1c2b8e7d4a1a9c0b6e2f1a2b3c4d"])
+
+
 # ── Response Schemas ───────────────────────────────────────────────────────────
 
 class TokenResponse(BaseModel):
@@ -154,3 +160,11 @@ class SubscriptionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CheckoutResponse(BaseModel):
+    """Response for POST /api/v1/subscriptions: the pending subscription plus
+    where to send the user to pay."""
+    subscription: SubscriptionResponse
+    checkout_url: str
+    session_id: str

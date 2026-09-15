@@ -6,6 +6,7 @@ from database import engine, Base, SessionLocal
 from models.domain_models import Application, Package, BillingCycle
 from api.routers import router as subscription_router, package_router
 from api.admin import router as admin_router, public_router as admin_public_router
+from api.webhooks import router as webhook_router
 
 # Create all tables on startup (dev convenience – use Alembic for production)
 Base.metadata.create_all(bind=engine)
@@ -94,6 +95,7 @@ app.include_router(subscription_router)
 app.include_router(package_router)
 app.include_router(admin_public_router)  # unauthenticated: /api/v1/admin/login
 app.include_router(admin_router)  # requires an admin-flagged JWT
+app.include_router(webhook_router)  # unauthenticated: called by the payment gateway, not a user
 
 
 # ── Static Admin UI Mount ──────────────────────────────────────────────────────

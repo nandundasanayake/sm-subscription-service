@@ -44,6 +44,11 @@ export interface AdminSubscription {
 
 import { clearAdminToken, getAdminToken } from './auth';
 
+// Deliberately relative, not a hardcoded host:port. This static export is
+// served from wherever it's mounted (subscription-service's own /admin
+// StaticFiles mount, or behind the gateway if that changes later) — a
+// relative path always resolves against that same origin, so there's
+// nothing here to keep in sync with the gateway's address.
 const BASE_URL = '/api/v1/admin';
 
 // The backend requires every /api/v1/admin/* request (other than /login) to
