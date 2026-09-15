@@ -7,6 +7,7 @@ from database import get_db
 from models.domain_models import Package
 from schemas import SubscriptionCreate, SubscriptionResponse, PackageResponse
 from repositories.sub_repository import SubscriptionRepository
+from api.dependencies import get_current_user_id
 
 router = APIRouter(prefix="/api/v1/subscriptions", tags=["Subscriptions"])
 package_router = APIRouter(prefix="/api/v1/packages", tags=["Packages"])
@@ -45,16 +46,17 @@ def get_public_packages(
 def initiate_checkout(
     payload: SubscriptionCreate,
     db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
     """
-    Creates a new **pending** subscription for the given user and package.
+    Creates a new **pending** subscription for the authenticated user and package.
 
     The caller should use the returned subscription ID to proceed with
     payment via the configured payment gateway.
     """
     repo = SubscriptionRepository(db)
     subscription = repo.create_pending_subscription(
-        user_id=payload.user_id,
+        user_id=user_id,
         package_id=payload.package_id,
     )
     return subscription
@@ -68,20 +70,31 @@ def initiate_checkout(
 def check_access(
     user_id: str,
     db: Session = Depends(get_db),
+    current_user_id: str = Depends(get_current_user_id),
 ):
     """
     Returns **all** subscriptions for the specified user, newest first.
+
+    The `user_id` path value is never trusted for the lookup itself — the
+    authenticated caller (from the JWT) must match it, or the request is
+    rejected. This prevents one user from reading another user's subscriptions.
 
     Use the `status` field on each subscription to determine access:
     - `active`  → user has valid access
     - `pending` → awaiting payment confirmation
     - `expired` / `cancelled` → no access
     """
+    if user_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You may only view your own subscriptions",
+        )
+
     repo = SubscriptionRepository(db)
-    subscriptions = repo.get_by_user_id(user_id)
+    subscriptions = repo.get_by_user_id(current_user_id)
     if not subscriptions:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No subscriptions found for user '{user_id}'",
+            detail=f"No subscriptions found for user '{current_user_id}'",
         )
     return subscriptions

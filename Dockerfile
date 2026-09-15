@@ -1,20 +1,21 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim
+# Stage 1: Build static Next.js Admin UI
+FROM node:20-alpine AS ui-builder
+WORKDIR /app/admin-ui
+COPY admin-ui/package*.json ./
+RUN npm install
+COPY admin-ui/ ./
+RUN npm run build
 
-# Set the working directory in the container
+# Stage 2: Final Python environment
+FROM python:3.10-slim
 WORKDIR /app
 
-# Copy the requirements file into the container
 COPY requirements.txt .
-
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
 COPY . .
+# Copy static export from ui-builder stage
+COPY --from=ui-builder /app/admin-ui/out ./admin-ui/out
 
-# Expose port 8003 for the subscription service
 EXPOSE 8003
-
-# Run the FastAPI application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]

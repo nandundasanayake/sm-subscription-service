@@ -1,12 +1,17 @@
+import os
+import secrets as secrets_module
+from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from jose import jwt
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from models.domain_models import Application, Package, Subscription
 from schemas import (
+    AdminLoginRequest,
     ApplicationCreate,
     ApplicationResponse,
     PackageCreate,
@@ -14,9 +19,54 @@ from schemas import (
     PackageResponse,
     SubscriptionStatusUpdate,
     SubscriptionResponse,
+    TokenResponse,
+)
+from api.dependencies import JWT_ALGORITHM, JWT_SECRET, require_admin
+
+# Stopgap single-account admin login — not a real user/role system.
+# INSECURE DEFAULTS, must be overridden via .env before any shared deployment.
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+ADMIN_TOKEN_EXPIRE_MINUTES = int(os.getenv("ADMIN_TOKEN_EXPIRE_MINUTES", "480"))
+
+# Unauthenticated: this is where an admin token is obtained in the first place.
+public_router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+
+# Everything else under /api/v1/admin requires a valid admin-flagged token.
+router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["Admin"],
+    dependencies=[Depends(require_admin)],
 )
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+
+@public_router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Admin login",
+)
+def admin_login(payload: AdminLoginRequest):
+    """Exchange admin username/password for a JWT carrying admin claims."""
+    valid_username = secrets_module.compare_digest(payload.username, ADMIN_USERNAME)
+    valid_password = secrets_module.compare_digest(payload.password, ADMIN_PASSWORD)
+    if not (valid_username and valid_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    expire = datetime.utcnow() + timedelta(minutes=ADMIN_TOKEN_EXPIRE_MINUTES)
+    token = jwt.encode(
+        {
+            "sub": payload.username,
+            "is_admin": True,
+            "role": "admin",
+            "exp": expire,
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+    return TokenResponse(access_token=token)
 
 
 # ── Application Endpoints ──────────────────────────────────────────────────────

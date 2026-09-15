@@ -9,6 +9,11 @@ from models.domain_models import BillingCycle, SubscriptionStatus, PaymentStatus
 
 # ── Request Schemas ────────────────────────────────────────────────────────────
 
+class AdminLoginRequest(BaseModel):
+    """Credentials for POST /api/v1/admin/login."""
+    username: str = Field(..., min_length=1, examples=["admin"])
+    password: str = Field(..., min_length=1, examples=["admin123"])
+
 class ApplicationCreate(BaseModel):
     """Payload to register a new application/tenant."""
     app_id: str = Field(..., min_length=1, max_length=100, examples=["scanme"])
@@ -26,14 +31,17 @@ class ApplicationCreate(BaseModel):
 
 
 class SubscriptionCreate(BaseModel):
-    """Payload to initiate a new subscription checkout."""
-    user_id: str
+    """Payload to initiate a new subscription checkout.
+
+    user_id is intentionally NOT part of this payload — it is derived from
+    the authenticated caller's JWT (see api/dependencies.py), never trusted
+    from client input.
+    """
     package_id: UUID
 
     class Config:
         json_schema_extra = {
             "example": {
-                "user_id": "user_abc123",
                 "package_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             }
         }
@@ -90,6 +98,12 @@ class SubscriptionStatusUpdate(BaseModel):
 
 
 # ── Response Schemas ───────────────────────────────────────────────────────────
+
+class TokenResponse(BaseModel):
+    """Response for POST /api/v1/admin/login."""
+    access_token: str
+    token_type: str = "bearer"
+
 
 class ApplicationResponse(BaseModel):
     id: UUID

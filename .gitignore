@@ -1,6 +1,16 @@
+# Node.js & Next.js (admin-ui)
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+out/
+**/out/
+*.tsbuildinfo
+
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # Python bytecode & cache
 __pycache__/

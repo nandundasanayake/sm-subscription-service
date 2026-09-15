@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base, SessionLocal
 from models.domain_models import Application, Package, BillingCycle
 from api.routers import router as subscription_router, package_router
-from api.admin import router as admin_router
+from api.admin import router as admin_router, public_router as admin_public_router
 
 # Create all tables on startup (dev convenience – use Alembic for production)
 Base.metadata.create_all(bind=engine)
@@ -92,7 +92,20 @@ app.add_middleware(
 # ── Routers ────────────────────────────────────────────────────────────────────
 app.include_router(subscription_router)
 app.include_router(package_router)
-app.include_router(admin_router)
+app.include_router(admin_public_router)  # unauthenticated: /api/v1/admin/login
+app.include_router(admin_router)  # requires an admin-flagged JWT
+
+
+# ── Static Admin UI Mount ──────────────────────────────────────────────────────
+import os
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+admin_ui_dir = Path(__file__).parent / "admin-ui" / "out"
+if admin_ui_dir.exists():
+    app.mount("/admin", StaticFiles(directory=str(admin_ui_dir), html=True), name="admin")
+
+
 
 
 # ── Health check ───────────────────────────────────────────────────────────────
