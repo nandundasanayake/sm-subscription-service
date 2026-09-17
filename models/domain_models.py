@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Float, DateTime, ForeignKey, Text, Enum as SAEnum
+    Column, String, Float, DateTime, ForeignKey, Text, JSON, Enum as SAEnum
 )
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship
@@ -56,10 +56,22 @@ class Package(Base):
     price = Column(Float, nullable=False)
     billing_cycle = Column(SAEnum(BillingCycle), nullable=False, default=BillingCycle.MONTHLY)
     features = Column(ARRAY(String), nullable=True)
+    # Structured, enforceable plan limits — distinct from `features` above, which is
+    # just the marketing bullet list shown on pricing pages. Shape:
+    # {"photographer_limits": {"max_events": int|null, "storage_limit_gb": int|null,
+    #  "max_photos_per_event": int|null, "event_link_expiry_days": int|null}}
+    # null or -1 in any of those fields means "unlimited".
+    limits = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    subscriptions = relationship("Subscription", back_populates="package")
+    # delete-orphan: deleting a Package (or detaching a Subscription from it)
+    # deletes its Subscriptions too, which in turn cascades to their Payments
+    # via Subscription.payments below — so `session.delete(package)` alone
+    # is enough to clear the whole tree without hitting the payments FK.
+    subscriptions = relationship(
+        "Subscription", back_populates="package", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return f"<Package {self.name} – {self.billing_cycle.value}>"
@@ -82,7 +94,13 @@ class Subscription(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     package = relationship("Package", back_populates="subscriptions")
-    payments = relationship("Payment", back_populates="subscription")
+    # delete-orphan: deleting a Subscription (directly, or via the Package
+    # cascade above) deletes its Payment rows too, avoiding the
+    # payments_subscription_id_fkey violation a bare subscription delete used
+    # to hit.
+    payments = relationship(
+        "Payment", back_populates="subscription", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return f"<Subscription user={self.user_id} status={self.status.value}>"

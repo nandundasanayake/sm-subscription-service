@@ -147,6 +147,7 @@ def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
         price=payload.price,
         billing_cycle=payload.billing_cycle,
         features=payload.features,
+        limits=payload.limits.model_dump(),
     )
     db.add(new_package)
     db.commit()
@@ -199,10 +200,11 @@ def delete_package(
         )
 
     try:
-        # Delete associated subscriptions first to satisfy foreign key constraints
-        db.query(Subscription).filter(Subscription.package_id == package_id).delete(
-            synchronize_session=False
-        )
+        # Package.subscriptions and Subscription.payments both cascade
+        # "all, delete-orphan" (see models/domain_models.py), so deleting the
+        # package alone removes its subscriptions and their payments too —
+        # no manual bulk-delete needed (that used to bypass the ORM cascade
+        # entirely and hit the payments_subscription_id_fkey constraint).
         db.delete(package)
         db.commit()
     except Exception as e:

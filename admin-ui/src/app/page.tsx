@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   fetchAdminApplications,
@@ -14,6 +14,7 @@ import {
   AdminApplication,
   AdminPackage,
   AdminSubscription,
+  PhotographerLimits,
 } from "@/lib/api";
 import { clearAdminToken, getAdminToken, isTokenValid } from "@/lib/auth";
 import Toast from "@/components/Toast";
@@ -41,6 +42,8 @@ import {
   AlertTriangle,
   Globe,
   LogOut,
+  Infinity as InfinityIcon,
+  Camera,
 } from "lucide-react";
 
 const formatDate = (dateString?: string | null) => {
@@ -62,6 +65,232 @@ const formatDate = (dateString?: string | null) => {
     hour12: true,
   });
 };
+
+// ── Photographer Limits form helpers ──────────────────────────────────────────
+// UI-only shape: each of the 4 limits is independently toggled on/off
+// ("enabled"), and while on is either "Unlimited" or backed by a concrete
+// number. Converted to the {number|null} shape the API expects on submit
+// (disabled and enabled-but-unlimited both submit as null — the backend has
+// no separate "enabled" concept, only a value or null), and derived back
+// from it when editing an existing package.
+type LimitFieldState = { enabled: boolean; unlimited: boolean; value: string };
+
+type PhotographerLimitsForm = {
+  max_events: LimitFieldState;
+  storage_limit_gb: LimitFieldState;
+  max_photos_per_event: LimitFieldState;
+  event_link_expiry_days: LimitFieldState;
+};
+
+const DISABLED_LIMIT_FIELD: LimitFieldState = { enabled: false, unlimited: true, value: "" };
+
+const DEFAULT_LIMITS_FORM: PhotographerLimitsForm = {
+  max_events: { ...DISABLED_LIMIT_FIELD },
+  storage_limit_gb: { ...DISABLED_LIMIT_FIELD },
+  max_photos_per_event: { ...DISABLED_LIMIT_FIELD },
+  event_link_expiry_days: { ...DISABLED_LIMIT_FIELD },
+};
+
+// null/-1 (backend also accepts -1, but we always emit null) is what both
+// "not enforced" and "enforced as Unlimited" persist as, so there's no way
+// to tell those two apart on load — we default to "not enforced" (off),
+// the more common case, and the admin can flip it on and leave "Unlimited"
+// checked if they specifically want that bullet auto-generated.
+const limitFieldFromValue = (value: number | null | undefined): LimitFieldState =>
+  value === null || value === undefined || value < 0
+    ? { ...DISABLED_LIMIT_FIELD }
+    : { enabled: true, unlimited: false, value: String(value) };
+
+const limitsFormFromPackage = (limits?: { photographer_limits?: Partial<PhotographerLimits> } | null): PhotographerLimitsForm => {
+  const pl = limits?.photographer_limits;
+  return {
+    max_events: limitFieldFromValue(pl?.max_events),
+    storage_limit_gb: limitFieldFromValue(pl?.storage_limit_gb),
+    max_photos_per_event: limitFieldFromValue(pl?.max_photos_per_event),
+    event_link_expiry_days: limitFieldFromValue(pl?.event_link_expiry_days),
+  };
+};
+
+type PhotographerLimitKey = keyof PhotographerLimitsForm;
+
+const PHOTOGRAPHER_LIMIT_FIELDS: {
+  key: PhotographerLimitKey;
+  label: string;
+  unit: string;
+  placeholder: string;
+}[] = [
+  { key: "max_events", label: "Max Events", unit: "events", placeholder: "e.g. 3" },
+  { key: "storage_limit_gb", label: "Storage Limit", unit: "GB", placeholder: "e.g. 5" },
+  { key: "max_photos_per_event", label: "Max Photos per Event", unit: "photos", placeholder: "e.g. 100" },
+  { key: "event_link_expiry_days", label: "Event Link Expiry", unit: "days", placeholder: "e.g. 7" },
+];
+
+// Each limit maps to a human-readable feature bullet. Kept as (value|null) ->
+// string so both the auto-generator and the strip-on-edit pattern derive
+// from the same wording — one place to change copy.
+const describeLimit = (
+  key: PhotographerLimitKey,
+  unlimited: boolean,
+  value: string
+): string | null => {
+  if (unlimited) {
+    return {
+      max_events: "Unlimited events",
+      storage_limit_gb: "Unlimited storage",
+      max_photos_per_event: "Unlimited photos per event",
+      event_link_expiry_days: "Event links never expire",
+    }[key];
+  }
+  const n = Number(value);
+  if (value.trim() === "" || !Number.isFinite(n)) return null;
+  return {
+    max_events: `Up to ${n} event${n === 1 ? "" : "s"}`,
+    storage_limit_gb: `${n}GB storage limit`,
+    max_photos_per_event: `${n} photo${n === 1 ? "" : "s"} per event`,
+    event_link_expiry_days: `Event links expire after ${n} day${n === 1 ? "" : "s"}`,
+  }[key];
+};
+
+// Matches anything describeLimit() could ever produce, for any key or
+// number, regardless of current field state — used to strip previously
+// auto-generated bullets out of a package's saved `features` list so they
+// aren't duplicated as "manual" text when re-opening the edit form.
+const AUTO_FEATURE_PATTERNS: RegExp[] = [
+  /^unlimited events$/i,
+  /^up to \d+ events?$/i,
+  /^unlimited storage$/i,
+  /^\d+gb storage limit$/i,
+  /^unlimited photos per event$/i,
+  /^\d+ photos? per event$/i,
+  /^event links never expire$/i,
+  /^event links expire after \d+ days?$/i,
+];
+
+const stripAutoGeneratedFeatures = (features?: string[] | null): string[] =>
+  (features || []).filter((f) => !AUTO_FEATURE_PATTERNS.some((re) => re.test(f.trim())));
+
+const buildAutoFeatures = (limits: PhotographerLimitsForm): string[] => {
+  return PHOTOGRAPHER_LIMIT_FIELDS.map(({ key }) => {
+    const field = limits[key];
+    return field.enabled ? describeLimit(key, field.unlimited, field.value) : null;
+  }).filter((f): f is string => f !== null);
+};
+
+// Disabled, or enabled-and-Unlimited, both submit as null to the API.
+const resolveLimitValue = (field: LimitFieldState): number | null =>
+  field.enabled && !field.unlimited ? parseInt(field.value, 10) : null;
+
+function ToggleSwitch({
+  id,
+  checked,
+  onChange,
+  label,
+  ariaLabel,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label?: string;
+  ariaLabel?: string;
+}) {
+  return (
+    <label htmlFor={id} className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+      {label && <span className="text-xs font-bold text-ink">{label}</span>}
+      <span className="relative inline-block w-9 h-5 shrink-0">
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          aria-label={label ? undefined : ariaLabel}
+          className="peer sr-only"
+        />
+        <span className="absolute inset-0 rounded-full bg-border peer-checked:bg-accent-dark transition-colors" />
+        <span className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform peer-checked:translate-x-4" />
+      </span>
+    </label>
+  );
+}
+
+function LimitFieldRow({
+  id,
+  label,
+  unit,
+  placeholder,
+  field,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  unit: string;
+  placeholder: string;
+  field: LimitFieldState;
+  onChange: (next: LimitFieldState) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-chalk/20 p-4">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <span className="text-xs font-semibold text-ink">{label}</span>
+        <ToggleSwitch
+          id={id}
+          checked={field.enabled}
+          ariaLabel={`Enforce ${label}`}
+          onChange={(enabled) =>
+            onChange(enabled ? { ...field, enabled: true } : { ...DISABLED_LIMIT_FIELD })
+          }
+        />
+      </div>
+
+      {field.enabled ? (
+        <div className="flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            {field.unlimited ? (
+              <div className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-dashed border-border bg-chalk/30 text-xs text-dim italic">
+                <InfinityIcon className="w-3.5 h-3.5 text-accent-dark shrink-0" />
+                Unlimited
+              </div>
+            ) : (
+              <div className="relative">
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={field.value}
+                  onChange={(e) => onChange({ ...field, value: e.target.value })}
+                  className="w-full pl-3.5 pr-16 py-2 text-sm rounded-xl border border-border bg-chalk/30 focus:bg-surface focus:outline-none focus:border-ink transition-colors font-mono"
+                  placeholder={placeholder}
+                />
+                <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-dim uppercase pointer-events-none">
+                  {unit}
+                </span>
+              </div>
+            )}
+          </div>
+
+          <label className="flex flex-col items-center gap-1 shrink-0 cursor-pointer select-none">
+            <span className="text-[10px] font-semibold text-dim uppercase tracking-wide">Unlimited</span>
+            <input
+              type="checkbox"
+              checked={field.unlimited}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? { ...field, unlimited: true, value: "" }
+                    : { ...field, unlimited: false }
+                )
+              }
+              className="w-4 h-4 rounded border-border text-accent-dark focus:ring-accent cursor-pointer"
+            />
+          </label>
+        </div>
+      ) : (
+        <p className="text-[11px] text-dim italic px-3.5 py-2 rounded-xl border border-dashed border-border bg-chalk/10">
+          Not enforced — unlimited by default.
+        </p>
+      )}
+    </div>
+  );
+}
 
 export default function AdminSubscriptionsPage() {
   const router = useRouter();
@@ -104,6 +333,16 @@ export default function AdminSubscriptionsPage() {
     billing_cycle: "monthly",
     features: "",
   });
+  const [limitsFormData, setLimitsFormData] = useState<PhotographerLimitsForm>(DEFAULT_LIMITS_FORM);
+
+  const updateLimitField = (key: PhotographerLimitKey, next: LimitFieldState) => {
+    setLimitsFormData((prev) => ({ ...prev, [key]: next }));
+  };
+
+  // Derived, not stored: recomputes from the limit fields on every change so
+  // it can never drift out of sync with what's actually about to be saved.
+  // Only individually-enabled limits contribute a bullet here.
+  const autoFeatures = useMemo(() => buildAutoFeatures(limitsFormData), [limitsFormData]);
 
   // Package Delete Confirmation State
   const [deletingPackage, setDeletingPackage] = useState<AdminPackage | null>(null);
@@ -149,6 +388,7 @@ export default function AdminSubscriptionsPage() {
       billing_cycle: "monthly",
       features: "",
     });
+    setLimitsFormData(DEFAULT_LIMITS_FORM);
     setLockedAppId(!!defaultAppId);
     setIsPackageModalOpen(true);
   };
@@ -162,8 +402,9 @@ export default function AdminSubscriptionsPage() {
       name: pkg.name,
       price: pkg.price.toString(),
       billing_cycle: pkg.billing_cycle || "monthly",
-      features: pkg.features ? pkg.features.join(", ") : "",
+      features: stripAutoGeneratedFeatures(pkg.features).join(", "),
     });
+    setLimitsFormData(limitsFormFromPackage(pkg.limits));
     setIsPackageModalOpen(true);
   };
 
@@ -206,19 +447,46 @@ export default function AdminSubscriptionsPage() {
       return;
     }
 
+    // Every enabled, non-unlimited limit needs a concrete non-negative
+    // integer. Disabled limits are skipped entirely — their inputs are
+    // hidden and they always submit as null.
+    for (const { key, label } of PHOTOGRAPHER_LIMIT_FIELDS) {
+      const field = limitsFormData[key];
+      if (!field.enabled || field.unlimited) continue;
+      const parsed = Number(field.value);
+      if (field.value.trim() === "" || !Number.isInteger(parsed) || parsed < 0) {
+        setToast({
+          message: `"${label}" needs a whole number of 0 or more, or check "Unlimited".`,
+          type: "error",
+        });
+        return;
+      }
+    }
+
     setSubmittingPackage(true);
     try {
-      const parsedFeatures = packageFormData.features
+      const manualFeatures = packageFormData.features
         .split(",")
         .map((f) => f.trim())
         .filter(Boolean);
+      // Auto-generated bullets first, then whatever the admin typed by hand;
+      // de-duped in case a manual entry happens to match one word-for-word.
+      const combinedFeatures = Array.from(new Set([...autoFeatures, ...manualFeatures]));
+
+      const photographerLimits: PhotographerLimits = {
+        max_events: resolveLimitValue(limitsFormData.max_events),
+        storage_limit_gb: resolveLimitValue(limitsFormData.storage_limit_gb),
+        max_photos_per_event: resolveLimitValue(limitsFormData.max_photos_per_event),
+        event_link_expiry_days: resolveLimitValue(limitsFormData.event_link_expiry_days),
+      };
 
       const payload = {
         app_id: packageFormData.app_id.trim() || "scanme",
         name: packageFormData.name.trim(),
         price: parseFloat(packageFormData.price),
         billing_cycle: packageFormData.billing_cycle,
-        features: parsedFeatures.length > 0 ? parsedFeatures : undefined,
+        features: combinedFeatures.length > 0 ? combinedFeatures : undefined,
+        limits: { photographer_limits: photographerLimits },
       };
 
       if (modalMode === "create") {
@@ -1117,11 +1385,11 @@ export default function AdminSubscriptionsPage() {
       {isPackageModalOpen && (
         <div className="fixed inset-0 bg-ink/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div
-            className="bg-surface rounded-2xl border border-border shadow-2xl w-full max-w-md overflow-hidden animate-fade-up"
+            className="bg-surface rounded-2xl border border-border shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col animate-fade-up"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-chalk/40">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-chalk/40 shrink-0">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent-dark flex items-center justify-center font-bold">
                   <Package className="w-4 h-4" />
@@ -1146,7 +1414,7 @@ export default function AdminSubscriptionsPage() {
             </div>
 
             {/* Modal Form */}
-            <form onSubmit={handlePackageFormSubmit} className="p-6 space-y-4">
+            <form onSubmit={handlePackageFormSubmit} className="p-6 space-y-4 overflow-y-auto">
               <div>
                 <label className="block text-xs font-semibold text-ink mb-1">
                   App ID <span className="text-danger">*</span>
@@ -1220,10 +1488,53 @@ export default function AdminSubscriptionsPage() {
                 </div>
               </div>
 
+              {/* Photographer Limitations */}
+              <div className="pt-1">
+                <div className="flex items-center gap-2 mb-2">
+                  <Camera className="w-3.5 h-3.5 text-accent-dark" />
+                  <h4 className="text-xs font-bold text-ink uppercase tracking-wide">
+                    Photographer Limitations
+                  </h4>
+                </div>
+                <p className="text-[11px] text-dim mb-3">
+                  Turn on any limits you want to enforce for photographers on this package —
+                  anything left off stays unlimited and won't appear under "Features Included".
+                </p>
+                <div className="space-y-3">
+                  {PHOTOGRAPHER_LIMIT_FIELDS.map(({ key, label, unit, placeholder }) => (
+                    <LimitFieldRow
+                      key={key}
+                      id={`enable-limit-${key}`}
+                      label={label}
+                      unit={unit}
+                      placeholder={placeholder}
+                      field={limitsFormData[key]}
+                      onChange={(next) => updateLimitField(key, next)}
+                    />
+                  ))}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold text-ink mb-1">
                   Features Included <span className="text-dim font-normal">(comma-separated)</span>
                 </label>
+
+                {autoFeatures.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {autoFeatures.map((f) => (
+                      <span
+                        key={f}
+                        title="Auto-generated from Photographer Limitations"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-accent/10 border border-accent/30 text-accent-dark"
+                      >
+                        <Sparkles className="w-2.5 h-2.5 shrink-0" />
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
                 <textarea
                   rows={3}
                   value={packageFormData.features}
@@ -1231,8 +1542,13 @@ export default function AdminSubscriptionsPage() {
                     setPackageFormData((prev) => ({ ...prev, features: e.target.value }))
                   }
                   className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-border bg-chalk/30 focus:bg-surface focus:outline-none focus:border-ink transition-colors resize-none"
-                  placeholder="e.g. Unlimited events, Priority AI matching, Custom domain"
+                  placeholder="e.g. Priority AI matching, Custom domain, Team collaboration (5 seats)"
                 />
+                <p className="text-[11px] text-dim mt-1">
+                  {autoFeatures.length > 0
+                    ? "The tags above are generated automatically from the limits and don't need to be typed here — just add anything extra."
+                    : "Shown to customers on the pricing page."}
+                </p>
               </div>
 
               {/* Form Buttons */}

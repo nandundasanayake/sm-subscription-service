@@ -2,9 +2,45 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from models.domain_models import BillingCycle, SubscriptionStatus, PaymentStatus
+
+
+# ── Package Limits ─────────────────────────────────────────────────────────────
+# Structured, enforceable plan limits stored in Package.limits (JSON). This is
+# separate from `features`, which is just the marketing bullet list shown on
+# pricing pages. In every field below, null or -1 means "unlimited".
+
+class PhotographerLimits(BaseModel):
+    """Per-photographer usage caps enforced for a subscription package."""
+    max_events: Optional[int] = Field(default=None, examples=[3])
+    storage_limit_gb: Optional[int] = Field(default=None, examples=[5])
+    max_photos_per_event: Optional[int] = Field(default=None, examples=[100])
+    event_link_expiry_days: Optional[int] = Field(default=None, examples=[7])
+
+    @field_validator(
+        "max_events", "storage_limit_gb", "max_photos_per_event", "event_link_expiry_days"
+    )
+    @classmethod
+    def normalize_unlimited(cls, v: Optional[int]) -> Optional[int]:
+        """Treat -1 as the canonical "unlimited" value, same as null."""
+        return None if v is not None and v < 0 else v
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "max_events": 3,
+                "storage_limit_gb": 5,
+                "max_photos_per_event": 100,
+                "event_link_expiry_days": 7,
+            }
+        }
+
+
+class PackageLimits(BaseModel):
+    """Envelope for all limit categories attached to a package."""
+    photographer_limits: PhotographerLimits = Field(default_factory=PhotographerLimits)
 
 
 # ── Request Schemas ────────────────────────────────────────────────────────────
@@ -55,6 +91,7 @@ class PackageCreate(BaseModel):
     price: float = Field(..., ge=0, examples=[15.00])
     billing_cycle: BillingCycle = Field(default=BillingCycle.MONTHLY, examples=["monthly"])
     features: Optional[List[str]] = Field(default=None, examples=[["Unlimited events", "Custom branding"]])
+    limits: PackageLimits = Field(default_factory=PackageLimits)
 
     class Config:
         json_schema_extra = {
@@ -64,6 +101,14 @@ class PackageCreate(BaseModel):
                 "price": 49.00,
                 "billing_cycle": "monthly",
                 "features": ["Unlimited events", "Team collaboration", "Custom API access"],
+                "limits": {
+                    "photographer_limits": {
+                        "max_events": None,
+                        "storage_limit_gb": 50,
+                        "max_photos_per_event": None,
+                        "event_link_expiry_days": 30,
+                    }
+                },
             }
         }
 
@@ -75,12 +120,21 @@ class PackageUpdate(BaseModel):
     price: Optional[float] = Field(default=None, ge=0)
     billing_cycle: Optional[BillingCycle] = None
     features: Optional[List[str]] = None
+    limits: Optional[PackageLimits] = None
 
     class Config:
         json_schema_extra = {
             "example": {
                 "name": "Pro Plus",
                 "price": 19.99,
+                "limits": {
+                    "photographer_limits": {
+                        "max_events": 10,
+                        "storage_limit_gb": 20,
+                        "max_photos_per_event": 500,
+                        "event_link_expiry_days": 14,
+                    }
+                },
             }
         }
 
@@ -129,6 +183,7 @@ class PackageResponse(BaseModel):
     price: float
     billing_cycle: BillingCycle
     features: Optional[List[str]] = None
+    limits: PackageLimits = Field(default_factory=PackageLimits)
 
     class Config:
         from_attributes = True

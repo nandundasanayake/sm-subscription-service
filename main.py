@@ -34,6 +34,14 @@ def seed_database():
                 "price": 0.00,
                 "billing_cycle": BillingCycle.MONTHLY,
                 "features": ["1 event per month", "Up to 50 photos per event", "Basic face matching"],
+                "limits": {
+                    "photographer_limits": {
+                        "max_events": 1,
+                        "storage_limit_gb": 1,
+                        "max_photos_per_event": 50,
+                        "event_link_expiry_days": 7,
+                    }
+                },
             },
             {
                 "id": uuid.UUID("123e4567-e89b-12d3-a456-426614174000"),
@@ -42,6 +50,14 @@ def seed_database():
                 "price": 15.00,
                 "billing_cycle": BillingCycle.MONTHLY,
                 "features": ["Unlimited events", "Advanced AI face matching", "Custom branding"],
+                "limits": {
+                    "photographer_limits": {
+                        "max_events": None,
+                        "storage_limit_gb": 20,
+                        "max_photos_per_event": None,
+                        "event_link_expiry_days": 30,
+                    }
+                },
             },
             {
                 "id": uuid.UUID("99999999-9999-9999-9999-999999999999"),
@@ -50,6 +66,14 @@ def seed_database():
                 "price": 49.00,
                 "billing_cycle": BillingCycle.MONTHLY,
                 "features": ["Everything in Pro", "Unlimited photos per event", "Team collaboration (5 seats)"],
+                "limits": {
+                    "photographer_limits": {
+                        "max_events": None,
+                        "storage_limit_gb": None,
+                        "max_photos_per_event": None,
+                        "event_link_expiry_days": None,
+                    }
+                },
             },
         ]
 

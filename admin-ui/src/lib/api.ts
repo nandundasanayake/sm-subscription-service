@@ -1,3 +1,17 @@
+// Structured, enforceable plan limits. Distinct from AdminPackage.features
+// (the marketing bullet list) below — this drives actual enforcement.
+// null means "unlimited" for every field.
+export interface PhotographerLimits {
+  max_events: number | null;
+  storage_limit_gb: number | null;
+  max_photos_per_event: number | null;
+  event_link_expiry_days: number | null;
+}
+
+export interface PackageLimits {
+  photographer_limits: PhotographerLimits;
+}
+
 export interface AdminApplication {
   id: string;
   app_id: string;
@@ -20,6 +34,7 @@ export interface AdminPackage {
   price: number;
   billing_cycle: string;
   features?: string[] | null;
+  limits?: PackageLimits | null;
   created_at?: string;
   updated_at?: string | null;
 }
@@ -30,6 +45,7 @@ export interface PackageInput {
   price: number;
   billing_cycle: string;
   features?: string[];
+  limits?: PackageLimits;
 }
 
 export interface AdminSubscription {
