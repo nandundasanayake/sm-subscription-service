@@ -1,10 +1,12 @@
+import uuid
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models.domain_models import Package
+from models.domain_models import Package, SubscriptionStatus
 from schemas import CheckoutResponse, SubscriptionCreate, SubscriptionResponse, PackageResponse
 from repositories.sub_repository import SubscriptionRepository
 from api.dependencies import get_current_user_id
@@ -12,6 +14,49 @@ from services.payment_provider import PaymentProvider, get_payment_provider
 
 router = APIRouter(prefix="/api/v1/subscriptions", tags=["Subscriptions"])
 package_router = APIRouter(prefix="/api/v1/packages", tags=["Packages"])
+
+# A fixed, arbitrary namespace UUID (not tied to any real DNS/URL) used only
+# to derive deterministic ids for virtual subscriptions below.
+_VIRTUAL_SUBSCRIPTION_NAMESPACE = uuid.UUID("6f6a6e7e-0000-4000-8000-76697274756c")
+
+
+def _get_free_package(db: Session) -> Optional[Package]:
+    """The package that backs the Free tier for users with no active
+    subscription. Prefers a package literally named "Free"; falls back to
+    the cheapest $0 package if none is named that. Not app_id-scoped — there
+    is no app context on a bare user_id today, only one app ("scanme")
+    exists, and every consumer of this only reads .package.limits, so this
+    is fine until real multi-tenant Free tiers are needed."""
+    return (
+        db.query(Package)
+        .filter(Package.name.ilike("free"))
+        .order_by(Package.created_at.asc())
+        .first()
+        or db.query(Package)
+        .filter(Package.price == 0)
+        .order_by(Package.created_at.asc())
+        .first()
+    )
+
+
+def _build_virtual_free_subscription(user_id: str, free_package: Package) -> SubscriptionResponse:
+    """A subscription that doesn't exist as a `subscriptions` row — synthesized
+    so that a user who never bought anything still gets a real, active
+    subscription back with a real package attached, driving their Free-tier
+    limits entirely from that package's `limits` in the database instead of
+    a number hardcoded in every consuming service."""
+    now = datetime.utcnow()
+    return SubscriptionResponse(
+        id=uuid.uuid5(_VIRTUAL_SUBSCRIPTION_NAMESPACE, f"virtual-free:{user_id}"),
+        user_id=user_id,
+        package_id=free_package.id,
+        status=SubscriptionStatus.ACTIVE,
+        current_period_start=None,
+        current_period_end=None,
+        created_at=now,
+        updated_at=now,
+        package=PackageResponse.model_validate(free_package),
+    )
 
 
 # ── Public Package Endpoints ───────────────────────────────────────────────────
@@ -113,6 +158,16 @@ def check_access(
     - `active`  → user has valid access
     - `pending` → awaiting payment confirmation
     - `expired` / `cancelled` → no access
+
+    If none of the user's subscriptions are `active` (including having none
+    at all), this never 404s — it synthesizes a *virtual* subscription
+    against whatever package is configured as the Free tier and puts it
+    first in the list, so every caller always gets a real, active package to
+    read limits from (the Free tier's limits then live entirely in that
+    package's `limits` column, not as a hardcoded fallback in every
+    consuming service). A 404 is only raised in the genuinely broken case
+    where the user has no subscriptions *and* no Free package is configured
+    at all.
     """
     if user_id != current_user_id:
         raise HTTPException(
@@ -122,9 +177,21 @@ def check_access(
 
     repo = SubscriptionRepository(db)
     subscriptions = repo.get_by_user_id(current_user_id)
-    if not subscriptions:
+
+    if any(s.status == SubscriptionStatus.ACTIVE for s in subscriptions):
+        return subscriptions
+
+    free_package = _get_free_package(db)
+    if not free_package:
+        if subscriptions:
+            return subscriptions
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No subscriptions found for user '{current_user_id}'",
+            detail=(
+                f"No subscriptions found for user '{current_user_id}', "
+                "and no default Free package is configured"
+            ),
         )
-    return subscriptions
+
+    virtual = _build_virtual_free_subscription(current_user_id, free_package)
+    return [virtual, *subscriptions]
