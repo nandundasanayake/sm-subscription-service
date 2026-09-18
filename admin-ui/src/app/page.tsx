@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import {
   fetchAdminApplications,
   createAdminApplication,
+  updateAdminApplication,
+  deleteAdminApplication,
   fetchAdminPackages,
   fetchAdminSubscriptions,
   updateAdminSubscriptionStatus,
@@ -292,12 +294,85 @@ function LimitFieldRow({
   );
 }
 
+// ── Pagination ─────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 10;
+
+function Pagination({
+  page,
+  total,
+  size,
+  onPageChange,
+  itemLabel,
+}: {
+  page: number;
+  total: number;
+  size: number;
+  onPageChange: (page: number) => void;
+  itemLabel: string;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const from = total === 0 ? 0 : (page - 1) * size + 1;
+  const to = Math.min(page * size, total);
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
+      <p className="text-[11px] text-dim">
+        {total === 0 ? `No ${itemLabel}` : `Showing ${from}–${to} of ${total} ${itemLabel}`}
+      </p>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          className="px-2.5 py-1.5 rounded-lg border border-border bg-chalk hover:bg-border/30 text-[11px] font-semibold text-dim hover:text-ink disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+        >
+          Previous
+        </button>
+        <span className="text-[11px] font-semibold text-ink px-2 whitespace-nowrap">
+          Page {page} of {totalPages}
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= totalPages}
+          className="px-2.5 py-1.5 rounded-lg border border-border bg-chalk hover:bg-border/30 text-[11px] font-semibold text-dim hover:text-ink disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One page of a resource, scoped to a single app_id.
+interface AppScopedPage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  loading: boolean;
+}
+
+const EMPTY_APP_PAGE = { items: [], total: 0, page: 1, loading: false };
+
 export default function AdminSubscriptionsPage() {
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
   const [applications, setApplications] = useState<AdminApplication[]>([]);
-  const [packages, setPackages] = useState<AdminPackage[]>([]);
-  const [subscriptions, setSubscriptions] = useState<AdminSubscription[]>([]);
+  const [applicationsTotal, setApplicationsTotal] = useState(0);
+  const [applicationsPage, setApplicationsPage] = useState(1);
+
+  // Packages/subscriptions are fetched per-app, paginated — each accordion
+  // owns its own page of each, keyed by app_id.
+  const [packagesByApp, setPackagesByApp] = useState<Record<string, AppScopedPage<AdminPackage>>>({});
+  const [subscriptionsByApp, setSubscriptionsByApp] = useState<Record<string, AppScopedPage<AdminSubscription>>>({});
+
+  // Cheap page=1&size=1 fetches purely to read `.total` for the metric cards
+  // below, without pulling every row across every app into memory.
+  const [packagesTotal, setPackagesTotal] = useState(0);
+  const [subscriptionsTotal, setSubscriptionsTotal] = useState(0);
+  const [activeSubsTotal, setActiveSubsTotal] = useState(0);
+  const [pendingSubsTotal, setPendingSubsTotal] = useState(0);
+
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -311,14 +386,20 @@ export default function AdminSubscriptionsPage() {
     type: "success" | "error" | "info";
   } | null>(null);
 
-  // Application Modal State (Register New App)
+  // Application Modal State (Register New App / Edit App)
   const [isAppModalOpen, setIsAppModalOpen] = useState(false);
+  const [appModalMode, setAppModalMode] = useState<"create" | "edit">("create");
+  const [editingApplicationId, setEditingApplicationId] = useState<string | null>(null);
   const [submittingApp, setSubmittingApp] = useState(false);
   const [appFormData, setAppFormData] = useState({
     app_id: "",
     name: "",
     description: "",
   });
+
+  // Application Delete Confirmation State
+  const [deletingApplication, setDeletingApplication] = useState<AdminApplication | null>(null);
+  const [isDeletingApplication, setIsDeletingApplication] = useState(false);
 
   // Package Modal State (Create / Edit)
   const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
@@ -348,14 +429,10 @@ export default function AdminSubscriptionsPage() {
   const [deletingPackage, setDeletingPackage] = useState<AdminPackage | null>(null);
   const [isDeletingPackage, setIsDeletingPackage] = useState(false);
 
-  // Extract all unique app IDs from registered apps, packages, and subscriptions
-  const rawAppIds = new Set<string>();
-  applications.forEach((a) => a.app_id && rawAppIds.add(a.app_id));
-  packages.forEach((p) => p.app_id && rawAppIds.add(p.app_id));
-  subscriptions.forEach((s) => s.package?.app_id && rawAppIds.add(s.package.app_id));
-  if (rawAppIds.size === 0) rawAppIds.add("scanme");
-
-  const uniqueAppIds = Array.from(rawAppIds).sort();
+  // The registered applications ARE the list of accordions now — packages
+  // and subscriptions are fetched per app_id on demand (see loadPackagesForApp
+  // / loadSubscriptionsForApp below), so there's no need to scan them here.
+  const uniqueAppIds = Array.from(new Set(applications.map((a) => a.app_id)));
 
   const toggleAppAccordion = (appId: string) => {
     setExpandedApps((prev) => ({
@@ -373,7 +450,20 @@ export default function AdminSubscriptionsPage() {
   };
 
   const openRegisterAppModal = () => {
+    setAppModalMode("create");
+    setEditingApplicationId(null);
     setAppFormData({ app_id: "", name: "", description: "" });
+    setIsAppModalOpen(true);
+  };
+
+  const openEditAppModal = (app: AdminApplication) => {
+    setAppModalMode("edit");
+    setEditingApplicationId(app.id);
+    setAppFormData({
+      app_id: app.app_id,
+      name: app.name,
+      description: app.description || "",
+    });
     setIsAppModalOpen(true);
   };
 
@@ -417,23 +507,33 @@ export default function AdminSubscriptionsPage() {
 
     setSubmittingApp(true);
     try {
-      await createAdminApplication({
+      const payload = {
         app_id: appFormData.app_id.trim().toLowerCase(),
         name: appFormData.name.trim(),
         description: appFormData.description.trim() || undefined,
-      });
+      };
 
-      setToast({
-        message: `🎉 Application "${appFormData.name}" registered successfully!`,
-        type: "success",
-      });
+      if (appModalMode === "create") {
+        await createAdminApplication(payload);
+        setToast({
+          message: `🎉 Application "${appFormData.name}" registered successfully!`,
+          type: "success",
+        });
+      } else if (appModalMode === "edit" && editingApplicationId) {
+        await updateAdminApplication(editingApplicationId, payload);
+        setToast({
+          message: `✨ Application "${appFormData.name}" updated successfully!`,
+          type: "success",
+        });
+      }
 
       setIsAppModalOpen(false);
+      setEditingApplicationId(null);
       setAppFormData({ app_id: "", name: "", description: "" });
-      await loadData(true);
+      await loadData(true, true);
     } catch (err: any) {
-      console.error("Failed to register application", err);
-      const detail = err?.message || "Failed to register application. Please try again.";
+      console.error(`Failed to ${appModalMode} application`, err);
+      const detail = err?.message || `Failed to ${appModalMode === "create" ? "register" : "update"} application. Please try again.`;
       setToast({ message: detail, type: "error" });
     } finally {
       setSubmittingApp(false);
@@ -505,7 +605,7 @@ export default function AdminSubscriptionsPage() {
 
       setIsPackageModalOpen(false);
       setEditingPackageId(null);
-      await loadData(true);
+      await loadData(true, true);
     } catch (err: any) {
       console.error("Failed to save package", err);
       const detail = err?.message || "Failed to save package. Please try again.";
@@ -525,7 +625,7 @@ export default function AdminSubscriptionsPage() {
         type: "success",
       });
       setDeletingPackage(null);
-      await loadData(true);
+      await loadData(true, true);
     } catch (err: any) {
       console.error("Failed to delete package", err);
       const detail = err?.message || "Failed to delete package. Please try again.";
@@ -535,20 +635,120 @@ export default function AdminSubscriptionsPage() {
     }
   };
 
-  const loadData = async (isManualRefresh = false) => {
+  const handleConfirmDeleteApplication = async () => {
+    if (!deletingApplication) return;
+    setIsDeletingApplication(true);
+    try {
+      await deleteAdminApplication(deletingApplication.id);
+      setToast({
+        message: `🗑️ Application "${deletingApplication.name}" deleted successfully!`,
+        type: "success",
+      });
+      setDeletingApplication(null);
+      await loadData(true, true);
+    } catch (err: any) {
+      console.error("Failed to delete application", err);
+      const detail = err?.message || "Failed to delete application. Please try again.";
+      setToast({ message: detail, type: "error" });
+    } finally {
+      setIsDeletingApplication(false);
+    }
+  };
+
+  const loadApplicationsPage = async (page: number): Promise<AdminApplication[]> => {
+    const res = await fetchAdminApplications({ page, size: PAGE_SIZE });
+    setApplications(res.items);
+    setApplicationsTotal(res.total);
+    setApplicationsPage(res.page);
+    // Whenever the set of visible apps changes (including paging through
+    // "Registered Platforms" itself), preload page 1 of each one's
+    // packages/subscriptions so their accordions aren't empty on expand.
+    await Promise.all(
+      res.items.flatMap((a) => [loadPackagesForApp(a.app_id, 1), loadSubscriptionsForApp(a.app_id, 1)])
+    );
+    return res.items;
+  };
+
+  const loadPackagesForApp = async (appId: string, page: number) => {
+    setPackagesByApp((prev) => ({
+      ...prev,
+      [appId]: { ...(prev[appId] ?? EMPTY_APP_PAGE), loading: true },
+    }));
+    try {
+      const res = await fetchAdminPackages({ appId, page, size: PAGE_SIZE });
+      setPackagesByApp((prev) => ({
+        ...prev,
+        [appId]: { items: res.items, total: res.total, page: res.page, loading: false },
+      }));
+    } catch (err: any) {
+      setPackagesByApp((prev) => ({
+        ...prev,
+        [appId]: { ...(prev[appId] ?? EMPTY_APP_PAGE), loading: false },
+      }));
+      setToast({ message: err?.message || `Failed to load packages for "${appId}".`, type: "error" });
+    }
+  };
+
+  const loadSubscriptionsForApp = async (appId: string, page: number, statusOverride?: string) => {
+    setSubscriptionsByApp((prev) => ({
+      ...prev,
+      [appId]: { ...(prev[appId] ?? EMPTY_APP_PAGE), loading: true },
+    }));
+    // statusOverride lets the Status dropdown's onChange pass the new value
+    // directly — reading `statusFilter` from closure there would still see
+    // the pre-update value until the next render.
+    const effectiveStatus = statusOverride ?? statusFilter;
+    try {
+      const res = await fetchAdminSubscriptions({
+        appId,
+        page,
+        size: PAGE_SIZE,
+        status: effectiveStatus === "ALL" ? undefined : effectiveStatus.toLowerCase(),
+      });
+      setSubscriptionsByApp((prev) => ({
+        ...prev,
+        [appId]: { items: res.items, total: res.total, page: res.page, loading: false },
+      }));
+    } catch (err: any) {
+      setSubscriptionsByApp((prev) => ({
+        ...prev,
+        [appId]: { ...(prev[appId] ?? EMPTY_APP_PAGE), loading: false },
+      }));
+      setToast({ message: err?.message || `Failed to load subscriptions for "${appId}".`, type: "error" });
+    }
+  };
+
+  // Cheap page=1&size=1 requests solely to read `.total` — keeps the metric
+  // cards accurate without pulling every subscription/package into memory.
+  const refreshMetricTotals = async () => {
+    const [pkgCount, subCount, activeCount, pendingCount] = await Promise.all([
+      fetchAdminPackages({ page: 1, size: 1 }),
+      fetchAdminSubscriptions({ page: 1, size: 1 }),
+      fetchAdminSubscriptions({ page: 1, size: 1, status: "active" }),
+      fetchAdminSubscriptions({ page: 1, size: 1, status: "pending" }),
+    ]);
+    setPackagesTotal(pkgCount.total);
+    setSubscriptionsTotal(subCount.total);
+    setActiveSubsTotal(activeCount.total);
+    setPendingSubsTotal(pendingCount.total);
+  };
+
+  // resetToFirstPage: after creating/editing/deleting something, jump back to
+  // page 1 of applications (a newly-created app sorts first) — a manual
+  // "Refresh" click instead preserves whatever page of applications you were
+  // on. Every app's packages/subscriptions always reload at page 1 either
+  // way, which keeps this simple and matches how most admin panels behave
+  // after a mutation.
+  const loadData = async (isManualRefresh = false, resetToFirstPage = false) => {
     if (isManualRefresh) setRefreshing(true);
     else setLoading(true);
     setToast(null);
 
     try {
-      const [apps, pkgs, subs] = await Promise.all([
-        fetchAdminApplications(),
-        fetchAdminPackages(),
-        fetchAdminSubscriptions(),
+      await Promise.all([
+        loadApplicationsPage(resetToFirstPage ? 1 : applicationsPage || 1),
+        refreshMetricTotals(),
       ]);
-      setApplications(apps);
-      setPackages(pkgs);
-      setSubscriptions(subs);
       if (isManualRefresh) {
         setToast({ message: "Data refreshed successfully!", type: "info" });
       }
@@ -586,17 +786,27 @@ export default function AdminSubscriptionsPage() {
     router.replace("/login");
   };
 
-  const handleStatusChange = async (subscriptionId: string, newStatus: string) => {
+  const handleStatusChange = async (appId: string, subscriptionId: string, newStatus: string) => {
     setUpdatingId(subscriptionId);
     try {
       const updated = await updateAdminSubscriptionStatus(subscriptionId, newStatus);
-      setSubscriptions((prev) =>
-        prev.map((s) => (s.id === subscriptionId ? { ...s, status: updated.status } : s))
-      );
+      setSubscriptionsByApp((prev) => {
+        const bucket = prev[appId];
+        if (!bucket) return prev;
+        return {
+          ...prev,
+          [appId]: {
+            ...bucket,
+            items: bucket.items.map((s) => (s.id === subscriptionId ? { ...s, status: updated.status } : s)),
+          },
+        };
+      });
       setToast({
         message: `Subscription status updated to "${newStatus.toUpperCase()}"`,
         type: "success",
       });
+      // The active/pending counts on the metric cards may have just shifted.
+      refreshMetricTotals().catch(() => {});
     } catch (err: any) {
       console.error("Status update failed", err);
       const detail = err?.message || "Failed to update subscription status.";
@@ -606,11 +816,13 @@ export default function AdminSubscriptionsPage() {
     }
   };
 
-  // Metrics
-  const totalSubs = subscriptions.length;
-  const activeSubs = subscriptions.filter((s) => s.status.toLowerCase() === "active").length;
-  const pendingSubs = subscriptions.filter((s) => s.status.toLowerCase() === "pending").length;
-  const totalPkgs = packages.length;
+  // Metrics — sourced from the lightweight count-only fetches in
+  // refreshMetricTotals(), not from whatever partial data happens to be
+  // loaded into packagesByApp/subscriptionsByApp at the moment.
+  const totalSubs = subscriptionsTotal;
+  const activeSubs = activeSubsTotal;
+  const pendingSubs = pendingSubsTotal;
+  const totalPkgs = packagesTotal;
 
   const renderStatusBadge = (status: string) => {
     const st = status.toLowerCase();
@@ -733,7 +945,7 @@ export default function AdminSubscriptionsPage() {
               <p className="text-xs font-semibold uppercase tracking-wider text-dim">
                 Registered Platforms
               </p>
-              <p className="font-display text-2xl font-bold mt-0.5">{uniqueAppIds.length}</p>
+              <p className="font-display text-2xl font-bold mt-0.5">{applicationsTotal}</p>
             </div>
           </div>
 
@@ -797,10 +1009,18 @@ export default function AdminSubscriptionsPage() {
               <span className="text-xs text-dim font-medium">Status:</span>
               <select
                 value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setStatusFilter(value);
+                  // Re-fetch page 1 of every visible app's subscriptions
+                  // under the new server-side status filter. Pass `value`
+                  // explicitly — `statusFilter` state won't reflect it until
+                  // the next render.
+                  applications.forEach((a) => loadSubscriptionsForApp(a.app_id, 1, value));
+                }}
                 className="text-xs font-semibold px-3 py-2 rounded-xl border border-border bg-surface text-ink focus:outline-none focus:border-ink cursor-pointer"
               >
-                <option value="ALL">All Statuses ({subscriptions.length})</option>
+                <option value="ALL">All Statuses ({subscriptionsTotal})</option>
                 <option value="ACTIVE">Active ({activeSubs})</option>
                 <option value="PENDING">Pending ({pendingSubs})</option>
                 <option value="CANCELLED">Cancelled</option>
@@ -833,7 +1053,7 @@ export default function AdminSubscriptionsPage() {
             <div className="w-8 h-8 border-3 border-ink border-t-transparent rounded-full animate-spin mx-auto" />
             <p className="text-sm font-medium">Loading multi-tenant application data...</p>
           </div>
-        ) : uniqueAppIds.length === 0 ? (
+        ) : applicationsTotal === 0 ? (
           <div className="bg-surface rounded-2xl border border-border p-16 text-center text-dim space-y-3">
             <Globe className="w-10 h-10 mx-auto text-dim/50" />
             <p className="text-base font-semibold text-ink">No Applications Registered</p>
@@ -844,6 +1064,20 @@ export default function AdminSubscriptionsPage() {
             >
               <Plus className="w-4 h-4" />
               <span>Register New Application</span>
+            </button>
+          </div>
+        ) : uniqueAppIds.length === 0 ? (
+          // Total > 0 but this page came back empty (e.g. the last item on
+          // the last page was just deleted) — nudge back to page 1 instead
+          // of showing a dead end.
+          <div className="bg-surface rounded-2xl border border-border p-16 text-center text-dim space-y-3">
+            <Globe className="w-10 h-10 mx-auto text-dim/50" />
+            <p className="text-base font-semibold text-ink">No applications on this page</p>
+            <button
+              onClick={() => loadApplicationsPage(1)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-accent text-ink hover:bg-accent-dark hover:text-white transition-all shadow-xs cursor-pointer"
+            >
+              Back to page 1
             </button>
           </div>
         ) : (
@@ -857,11 +1091,14 @@ export default function AdminSubscriptionsPage() {
               const appTitle = appRecord?.name || appId;
               const appDesc = appRecord?.description;
 
-              // App-specific packages & subscriptions
-              const appPackages = packages.filter((p) => (p.app_id || "scanme") === appId);
-              const appSubscriptionsAll = subscriptions.filter(
-                (s) => (s.package?.app_id || "scanme") === appId
-              );
+              // App-specific packages & subscriptions — one paginated page
+              // each, fetched on demand (see loadPackagesForApp /
+              // loadSubscriptionsForApp). Search below only filters within
+              // whatever page is currently loaded, not across the full set.
+              const packagesPageState = packagesByApp[appId] ?? EMPTY_APP_PAGE;
+              const subscriptionsPageState = subscriptionsByApp[appId] ?? EMPTY_APP_PAGE;
+              const appPackages = packagesPageState.items;
+              const appSubscriptionsAll = subscriptionsPageState.items;
 
               const appActiveCount = appSubscriptionsAll.filter(
                 (s) => s.status.toLowerCase() === "active"
@@ -870,7 +1107,7 @@ export default function AdminSubscriptionsPage() {
                 (s) => s.status.toLowerCase() === "pending"
               ).length;
 
-              // Filtered subscriptions for this app
+              // Filtered subscriptions for this app (within the loaded page only)
               const appSubscriptionsFiltered = appSubscriptionsAll.filter((sub) => {
                 const matchesSearch =
                   sub.user_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -884,7 +1121,7 @@ export default function AdminSubscriptionsPage() {
                 return matchesSearch && matchesStatus;
               });
 
-              // Filtered packages for this app
+              // Filtered packages for this app (within the loaded page only)
               const appPackagesFiltered = appPackages.filter((pkg) => {
                 return (
                   pkg.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -917,7 +1154,7 @@ export default function AdminSubscriptionsPage() {
                           </span>
                         </div>
                         <p className="text-xs text-dim mt-0.5">
-                          {appDesc || `${appSubscriptionsAll.length} total subscriptions • ${appPackages.length} active packages`}
+                          {appDesc || `${subscriptionsPageState.total} total subscriptions • ${packagesPageState.total} packages`}
                         </p>
                       </div>
                     </div>
@@ -926,7 +1163,7 @@ export default function AdminSubscriptionsPage() {
                     <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
                       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-semibold bg-surface border border-border text-ink">
                         <Users className="w-3.5 h-3.5 text-dim" />
-                        <span>{appSubscriptionsAll.length} Subscriptions</span>
+                        <span>{subscriptionsPageState.total} Subscriptions</span>
                       </span>
 
                       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-semibold bg-success/10 border border-success/20 text-success">
@@ -943,12 +1180,39 @@ export default function AdminSubscriptionsPage() {
 
                       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-semibold bg-accent/10 border border-accent/20 text-accent-dark">
                         <Package className="w-3.5 h-3.5" />
-                        <span>{appPackages.length} Packages</span>
+                        <span>{packagesPageState.total} Packages</span>
                       </span>
                     </div>
 
-                    {/* Right: Pre-filled Package Action & Expand Toggle */}
-                    <div className="flex items-center gap-3">
+                    {/* Right: App actions, Add Package & Expand Toggle */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (appRecord) openEditAppModal(appRecord);
+                        }}
+                        disabled={!appRecord}
+                        className="p-2 rounded-xl border border-border bg-surface hover:bg-chalk hover:border-ink text-dim hover:text-ink transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                        title={appRecord ? `Edit ${appTitle}` : "No matching Application record"}
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (appRecord) setDeletingApplication(appRecord);
+                        }}
+                        disabled={!appRecord}
+                        className="p-2 rounded-xl border border-danger/20 bg-danger/5 hover:bg-danger hover:text-white text-danger transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                        title={appRecord ? `Delete ${appTitle}` : "No matching Application record"}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+
+                      <div className="w-px h-6 bg-border mx-1" />
+
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1101,7 +1365,7 @@ export default function AdminSubscriptionsPage() {
                                             ) : (
                                               <>
                                                 <button
-                                                  onClick={() => handleStatusChange(sub.id, "active")}
+                                                  onClick={() => handleStatusChange(appId, sub.id, "active")}
                                                   disabled={sub.status.toLowerCase() === "active"}
                                                   className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
                                                     sub.status.toLowerCase() === "active"
@@ -1114,7 +1378,7 @@ export default function AdminSubscriptionsPage() {
                                                 </button>
 
                                                 <button
-                                                  onClick={() => handleStatusChange(sub.id, "pending")}
+                                                  onClick={() => handleStatusChange(appId, sub.id, "pending")}
                                                   disabled={sub.status.toLowerCase() === "pending"}
                                                   className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
                                                     sub.status.toLowerCase() === "pending"
@@ -1127,7 +1391,7 @@ export default function AdminSubscriptionsPage() {
                                                 </button>
 
                                                 <button
-                                                  onClick={() => handleStatusChange(sub.id, "cancelled")}
+                                                  onClick={() => handleStatusChange(appId, sub.id, "cancelled")}
                                                   disabled={sub.status.toLowerCase() === "cancelled"}
                                                   className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
                                                     sub.status.toLowerCase() === "cancelled"
@@ -1148,6 +1412,15 @@ export default function AdminSubscriptionsPage() {
                                 </tbody>
                               </table>
                             </div>
+                          )}
+                          {subscriptionsPageState.total > 0 && (
+                            <Pagination
+                              page={subscriptionsPageState.page}
+                              total={subscriptionsPageState.total}
+                              size={PAGE_SIZE}
+                              onPageChange={(p) => loadSubscriptionsForApp(appId, p)}
+                              itemLabel="subscriptions"
+                            />
                           )}
                         </div>
                       )}
@@ -1256,6 +1529,15 @@ export default function AdminSubscriptionsPage() {
                               </table>
                             </div>
                           )}
+                          {packagesPageState.total > 0 && (
+                            <Pagination
+                              page={packagesPageState.page}
+                              total={packagesPageState.total}
+                              size={PAGE_SIZE}
+                              onPageChange={(p) => loadPackagesForApp(appId, p)}
+                              itemLabel="packages"
+                            />
+                          )}
                         </div>
                       )}
                     </div>
@@ -1265,9 +1547,21 @@ export default function AdminSubscriptionsPage() {
             })}
           </div>
         )}
+
+        {!loading && applicationsTotal > 0 && (
+          <div className="bg-surface p-4 rounded-2xl border border-border shadow-xs">
+            <Pagination
+              page={applicationsPage}
+              total={applicationsTotal}
+              size={PAGE_SIZE}
+              onPageChange={(p) => loadApplicationsPage(p)}
+              itemLabel="registered platforms"
+            />
+          </div>
+        )}
       </div>
 
-      {/* ── Register New Application Modal ──────────────────── */}
+      {/* ── Register / Edit Application Modal ─────────────────── */}
       {isAppModalOpen && (
         <div className="fixed inset-0 bg-ink/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div
@@ -1282,10 +1576,12 @@ export default function AdminSubscriptionsPage() {
                 </div>
                 <div>
                   <h3 className="font-display text-base font-bold text-ink">
-                    Register New Application
+                    {appModalMode === "create" ? "Register New Application" : "Edit Application"}
                   </h3>
                   <p className="text-[11px] text-dim">
-                    Add a new platform/tenant to the multi-application registry
+                    {appModalMode === "create"
+                      ? "Add a new platform/tenant to the multi-application registry"
+                      : "Update this platform's details"}
                   </p>
                 </div>
               </div>
@@ -1366,12 +1662,17 @@ export default function AdminSubscriptionsPage() {
                   {submittingApp ? (
                     <>
                       <span className="w-3.5 h-3.5 border-2 border-chalk border-t-transparent rounded-full animate-spin" />
-                      <span>Registering...</span>
+                      <span>{appModalMode === "create" ? "Registering..." : "Saving..."}</span>
                     </>
-                  ) : (
+                  ) : appModalMode === "create" ? (
                     <>
                       <Plus className="w-4 h-4 text-accent" />
                       <span>Register Application</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pencil className="w-4 h-4 text-accent" />
+                      <span>Save Changes</span>
                     </>
                   )}
                 </button>
@@ -1629,6 +1930,59 @@ export default function AdminSubscriptionsPage() {
                   <>
                     <Trash2 className="w-3.5 h-3.5" />
                     Delete Package
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Application Confirmation Modal ───────────── */}
+      {deletingApplication && (
+        <div className="fixed inset-0 bg-ink/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div
+            className="bg-surface rounded-2xl border border-border shadow-2xl w-full max-w-sm overflow-hidden animate-fade-up p-6 text-center space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-12 h-12 rounded-2xl bg-danger/10 border border-danger/20 text-danger flex items-center justify-center mx-auto">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+
+            <div>
+              <h3 className="font-display text-lg font-bold text-ink">Delete Application?</h3>
+              <p className="text-xs text-dim mt-1">
+                Are you sure you want to delete <span className="font-semibold text-ink">"{deletingApplication.name}"</span>? This
+                action cannot be undone. Any existing packages under app_id{" "}
+                <span className="font-mono font-semibold text-ink">"{deletingApplication.app_id}"</span> stay in the
+                database but will no longer be grouped under a registered app here.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingApplication(null)}
+                disabled={isDeletingApplication}
+                className="px-4 py-2 rounded-xl text-xs font-semibold border border-border bg-chalk hover:bg-border/30 text-dim hover:text-ink transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteApplication}
+                disabled={isDeletingApplication}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-danger text-white hover:bg-danger/90 disabled:opacity-50 transition-all cursor-pointer shadow-sm active:scale-95"
+              >
+                {isDeletingApplication ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete Application
                   </>
                 )}
               </button>

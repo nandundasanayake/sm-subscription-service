@@ -1,7 +1,7 @@
 import os
 import secrets as secrets_module
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -9,19 +9,39 @@ from jose import jwt
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
-from models.domain_models import Application, Package, Subscription
+from models.domain_models import Application, Package, Subscription, SubscriptionStatus
 from schemas import (
     AdminLoginRequest,
     ApplicationCreate,
+    ApplicationUpdate,
     ApplicationResponse,
     PackageCreate,
     PackageUpdate,
     PackageResponse,
+    PaginatedResponse,
     SubscriptionStatusUpdate,
     SubscriptionResponse,
     TokenResponse,
 )
 from api.dependencies import JWT_ALGORITHM, JWT_SECRET, require_admin
+
+
+class PageParams:
+    """Shared `?page=&size=` query params for every paginated admin list
+    endpoint — page is 1-indexed, size is capped to keep any single request
+    from pulling an unbounded number of rows."""
+
+    def __init__(
+        self,
+        page: int = Query(1, ge=1, description="1-indexed page number"),
+        size: int = Query(10, ge=1, le=100, description="Rows per page (max 100)"),
+    ):
+        self.page = page
+        self.size = size
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.size
 
 # Stopgap single-account admin login — not a real user/role system.
 # INSECURE DEFAULTS, must be overridden via .env before any shared deployment.
@@ -74,13 +94,18 @@ def admin_login(payload: AdminLoginRequest):
 
 @router.get(
     "/applications",
-    response_model=List[ApplicationResponse],
-    summary="Retrieve all registered applications",
+    response_model=PaginatedResponse[ApplicationResponse],
+    summary="Retrieve registered applications (paginated)",
 )
-def get_all_applications(db: Session = Depends(get_db)):
-    """Return every registered application/tenant in the system."""
-    apps = db.query(Application).order_by(Application.created_at.desc()).all()
-    return apps
+def get_all_applications(
+    pagination: PageParams = Depends(),
+    db: Session = Depends(get_db),
+):
+    """Return a page of registered applications/tenants, newest first."""
+    query = db.query(Application).order_by(Application.created_at.desc())
+    total = query.count()
+    apps = query.offset(pagination.offset).limit(pagination.size).all()
+    return PaginatedResponse(items=apps, total=total, page=pagination.page, size=pagination.size)
 
 
 @router.post(
@@ -113,24 +138,124 @@ def create_application(payload: ApplicationCreate, db: Session = Depends(get_db)
     return new_app
 
 
+@router.put(
+    "/applications/{application_id}",
+    response_model=ApplicationResponse,
+    summary="Update an existing application",
+)
+def update_application(
+    application_id: UUID,
+    payload: ApplicationUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update the fields of an existing application (only supplied fields are changed)."""
+    app_obj = db.query(Application).filter(Application.id == application_id).first()
+    if not app_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Application '{application_id}' not found",
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "app_id" in update_data:
+        new_app_id = update_data["app_id"].strip()
+        clashing = (
+            db.query(Application)
+            .filter(Application.app_id == new_app_id, Application.id != application_id)
+            .first()
+        )
+        if clashing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Application with app_id '{new_app_id}' already exists.",
+            )
+        update_data["app_id"] = new_app_id
+
+    if "name" in update_data:
+        update_data["name"] = update_data["name"].strip()
+
+    if "description" in update_data and update_data["description"] is not None:
+        update_data["description"] = update_data["description"].strip() or None
+
+    for field, value in update_data.items():
+        setattr(app_obj, field, value)
+
+    db.commit()
+    db.refresh(app_obj)
+    return app_obj
+
+
+@router.delete(
+    "/applications/{application_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete an application",
+)
+def delete_application(
+    application_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Delete an application by its ID, along with every package registered
+    under its `app_id` — and, transitively, their subscriptions and payments.
+
+    Package.app_id is a loose string, not a foreign key to this table (see
+    models/domain_models.py), so the database itself won't cascade a delete
+    here. We reproduce that cascade manually: load each matching Package as
+    an ORM object and `db.delete()` it individually (never a bulk
+    `Query.delete()`, which bypasses ORM cascades entirely) so SQLAlchemy's
+    unit-of-work walks Package -> Subscription -> Payment bottom-up via the
+    `cascade="all, delete-orphan"` relationships already in place, leaving no
+    orphaned rows behind.
+    """
+    app_obj = db.query(Application).filter(Application.id == application_id).first()
+    if not app_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Application '{application_id}' not found",
+        )
+
+    try:
+        packages = db.query(Package).filter(Package.app_id == app_obj.app_id).all()
+        for package in packages:
+            db.delete(package)
+
+        # Subscription has no app_id of its own — every row is reached via
+        # its (non-nullable) package_id, so the loop above already accounts
+        # for all of them. Nothing to separately query here.
+
+        db.delete(app_obj)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to delete application: {str(e)}",
+        )
+
+    return {"message": f"Application '{application_id}' deleted successfully"}
+
+
 # ── Package Endpoints ──────────────────────────────────────────────────────────
 
 
 @router.get(
     "/packages",
-    response_model=List[PackageResponse],
-    summary="Retrieve all packages",
+    response_model=PaginatedResponse[PackageResponse],
+    summary="Retrieve packages (paginated)",
 )
 def get_all_packages(
     app_id: Optional[str] = Query(None, description="Optional Application ID to filter packages"),
+    pagination: PageParams = Depends(),
     db: Session = Depends(get_db),
 ):
-    """Return every package in the system, optionally filtered by app_id."""
+    """Return a page of packages, optionally filtered by app_id, newest first."""
     query = db.query(Package)
     if app_id:
         query = query.filter(Package.app_id == app_id.strip())
-    packages = query.order_by(Package.created_at.desc()).all()
-    return packages
+    query = query.order_by(Package.created_at.desc())
+    total = query.count()
+    packages = query.offset(pagination.offset).limit(pagination.size).all()
+    return PaginatedResponse(items=packages, total=total, page=pagination.page, size=pagination.size)
 
 
 @router.post(
@@ -222,18 +347,31 @@ def delete_package(
 
 @router.get(
     "/subscriptions",
-    response_model=List[SubscriptionResponse],
-    summary="Retrieve all subscriptions",
+    response_model=PaginatedResponse[SubscriptionResponse],
+    summary="Retrieve subscriptions (paginated)",
 )
-def get_all_subscriptions(db: Session = Depends(get_db)):
-    """Return every subscription with its related package details."""
-    subscriptions = (
-        db.query(Subscription)
-        .options(joinedload(Subscription.package))
-        .order_by(Subscription.created_at.desc())
-        .all()
-    )
-    return subscriptions
+def get_all_subscriptions(
+    app_id: Optional[str] = Query(None, description="Optional Application ID to filter subscriptions by their package"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Optional status to filter by (active, pending, cancelled, expired)"),
+    pagination: PageParams = Depends(),
+    db: Session = Depends(get_db),
+):
+    """Return a page of subscriptions with their related package details, newest first."""
+    query = db.query(Subscription).options(joinedload(Subscription.package))
+    if app_id:
+        query = query.join(Package, Subscription.package_id == Package.id).filter(Package.app_id == app_id.strip())
+    if status_filter:
+        try:
+            query = query.filter(Subscription.status == SubscriptionStatus(status_filter.strip().lower()))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status '{status_filter}'. Must be one of: {[s.value for s in SubscriptionStatus]}",
+            )
+    query = query.order_by(Subscription.created_at.desc())
+    total = query.count()
+    subscriptions = query.offset(pagination.offset).limit(pagination.size).all()
+    return PaginatedResponse(items=subscriptions, total=total, page=pagination.page, size=pagination.size)
 
 
 @router.patch(

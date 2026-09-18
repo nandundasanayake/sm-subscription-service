@@ -1,10 +1,23 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Generic, Optional, List, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
 from models.domain_models import BillingCycle, SubscriptionStatus, PaymentStatus
+
+
+# ── Pagination ─────────────────────────────────────────────────────────────────
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Standard envelope for every paginated admin list endpoint."""
+    items: List[T]
+    total: int = Field(..., description="Total number of matching rows, across all pages")
+    page: int = Field(..., description="1-indexed page number returned")
+    size: int = Field(..., description="Max rows per page that was requested")
 
 
 # ── Package Limits ─────────────────────────────────────────────────────────────
@@ -62,6 +75,21 @@ class ApplicationCreate(BaseModel):
                 "app_id": "scanme",
                 "name": "ScanMe Platform",
                 "description": "Core ScanMe event photography platform.",
+            }
+        }
+
+
+class ApplicationUpdate(BaseModel):
+    """Payload to update an existing application (all fields optional)."""
+    app_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "ScanMe Platform (Renamed)",
+                "description": "Updated description.",
             }
         }
 

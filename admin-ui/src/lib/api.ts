@@ -27,6 +27,21 @@ export interface ApplicationInput {
   description?: string;
 }
 
+export type ApplicationUpdateInput = Partial<ApplicationInput>;
+
+// Standard envelope every paginated admin list endpoint returns.
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface PageParams {
+  page?: number;
+  size?: number;
+}
+
 export interface AdminPackage {
   id: string;
   app_id: string;
@@ -94,9 +109,20 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json();
 }
 
-export async function fetchAdminApplications(): Promise<AdminApplication[]> {
-  const res = await fetch(`${BASE_URL}/applications`, { headers: authHeaders() });
-  return handleResponse<AdminApplication[]>(res);
+function buildQuery(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') qs.set(key, String(value));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+export async function fetchAdminApplications(
+  params: PageParams = {}
+): Promise<PaginatedResponse<AdminApplication>> {
+  const res = await fetch(`${BASE_URL}/applications${buildQuery({ ...params })}`, { headers: authHeaders() });
+  return handleResponse<PaginatedResponse<AdminApplication>>(res);
 }
 
 export async function createAdminApplication(input: ApplicationInput): Promise<AdminApplication> {
@@ -108,10 +134,38 @@ export async function createAdminApplication(input: ApplicationInput): Promise<A
   return handleResponse<AdminApplication>(res);
 }
 
-export async function fetchAdminPackages(appId?: string): Promise<AdminPackage[]> {
-  const url = appId ? `${BASE_URL}/packages?app_id=${encodeURIComponent(appId)}` : `${BASE_URL}/packages`;
-  const res = await fetch(url, { headers: authHeaders() });
-  return handleResponse<AdminPackage[]>(res);
+export async function updateAdminApplication(
+  id: string,
+  input: ApplicationUpdateInput
+): Promise<AdminApplication> {
+  const res = await fetch(`${BASE_URL}/applications/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  return handleResponse<AdminApplication>(res);
+}
+
+export async function deleteAdminApplication(id: string): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/applications/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  return handleResponse<{ message: string }>(res);
+}
+
+export interface FetchPackagesParams extends PageParams {
+  appId?: string;
+}
+
+export async function fetchAdminPackages(
+  params: FetchPackagesParams = {}
+): Promise<PaginatedResponse<AdminPackage>> {
+  const { appId, ...page } = params;
+  const res = await fetch(`${BASE_URL}/packages${buildQuery({ app_id: appId, ...page })}`, {
+    headers: authHeaders(),
+  });
+  return handleResponse<PaginatedResponse<AdminPackage>>(res);
 }
 
 export async function createAdminPackage(input: PackageInput): Promise<AdminPackage> {
@@ -140,9 +194,20 @@ export async function deleteAdminPackage(id: string): Promise<{ message: string 
   return handleResponse<{ message: string }>(res);
 }
 
-export async function fetchAdminSubscriptions(): Promise<AdminSubscription[]> {
-  const res = await fetch(`${BASE_URL}/subscriptions`, { headers: authHeaders() });
-  return handleResponse<AdminSubscription[]>(res);
+export interface FetchSubscriptionsParams extends PageParams {
+  appId?: string;
+  status?: string;
+}
+
+export async function fetchAdminSubscriptions(
+  params: FetchSubscriptionsParams = {}
+): Promise<PaginatedResponse<AdminSubscription>> {
+  const { appId, status, ...page } = params;
+  const res = await fetch(
+    `${BASE_URL}/subscriptions${buildQuery({ app_id: appId, status, ...page })}`,
+    { headers: authHeaders() }
+  );
+  return handleResponse<PaginatedResponse<AdminSubscription>>(res);
 }
 
 export async function updateAdminSubscriptionStatus(
