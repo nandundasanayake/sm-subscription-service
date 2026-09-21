@@ -7,8 +7,8 @@ from jose import JWTError, jwt
 
 load_dotenv()
 
-# Must match the JWT_SECRET/JWT_ALGORITHM used by the service that issues tokens
-# (sm-photographer-service /auth/login, sm-guest-service /guest/auth/*). This
+# Must match the JWT_SECRET/JWT_ALGORITHM used by sm-photographer-service,
+# the sole issuer of tokens for every user (see its /auth/* endpoints). This
 # service only verifies tokens — it does not issue them.
 JWT_SECRET = os.getenv("JWT_SECRET", "change_me_in_production")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
