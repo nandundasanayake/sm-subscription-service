@@ -46,10 +46,11 @@ class PageParams:
     def offset(self) -> int:
         return (self.page - 1) * self.size
 
-# Stopgap single-account admin login — not a real user/role system.
-# INSECURE DEFAULTS, must be overridden via .env before any shared deployment.
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# Stopgap single-account admin login — not a real user/role system. No
+# defaults: if ADMIN_USERNAME / ADMIN_PASSWORD aren't set, admin login is
+# disabled rather than falling back to well-known credentials.
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_TOKEN_EXPIRE_MINUTES = int(os.getenv("ADMIN_TOKEN_EXPIRE_MINUTES", "480"))
 
 # Unauthenticated: this is where an admin token is obtained in the first place.
@@ -70,8 +71,14 @@ router = APIRouter(
 )
 def admin_login(payload: AdminLoginRequest):
     """Exchange admin username/password for a JWT carrying admin claims."""
-    valid_username = secrets_module.compare_digest(payload.username, ADMIN_USERNAME)
-    valid_password = secrets_module.compare_digest(payload.password, ADMIN_PASSWORD)
+    if not (ADMIN_USERNAME and ADMIN_PASSWORD):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin login is not configured.",
+        )
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    valid_username = secrets_module.compare_digest(payload.username.encode(), ADMIN_USERNAME.encode())
+    valid_password = secrets_module.compare_digest(payload.password.encode(), ADMIN_PASSWORD.encode())
     if not (valid_username and valid_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

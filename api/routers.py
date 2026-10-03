@@ -56,6 +56,7 @@ def _build_virtual_free_subscription(user_id: str, free_package: Package) -> Sub
         created_at=now,
         updated_at=now,
         package=PackageResponse.model_validate(free_package),
+        is_virtual=True,
     )
 
 

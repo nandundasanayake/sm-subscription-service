@@ -124,7 +124,6 @@ app.include_router(webhook_router)  # unauthenticated: called by the payment gat
 
 
 # ── Static Admin UI Mount ──────────────────────────────────────────────────────
-import os
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 

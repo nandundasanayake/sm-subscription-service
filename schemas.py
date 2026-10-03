@@ -256,6 +256,10 @@ class SubscriptionResponse(BaseModel):
     updated_at: datetime
     package: Optional[PackageResponse] = None
     payments: Optional[List[PaymentResponse]] = None
+    # True only for the synthesized Free-tier subscription (no DB row, no
+    # billing period, created_at = "now"), so consumers don't mistake its
+    # timestamps for a real subscription start.
+    is_virtual: bool = False
 
     class Config:
         from_attributes = True

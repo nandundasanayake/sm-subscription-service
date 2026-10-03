@@ -10,7 +10,11 @@ load_dotenv()
 # Must match the JWT_SECRET/JWT_ALGORITHM used by sm-photographer-service,
 # the sole issuer of tokens for every user (see its /auth/* endpoints). This
 # service only verifies tokens — it does not issue them.
-JWT_SECRET = os.getenv("JWT_SECRET", "change_me_in_production")
+# Required: with a publicly known fallback, anyone could forge user or admin
+# tokens, so refuse to start without it.
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET must be set (it must match sm-photographer-service).")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 # tokenUrl is only used for OpenAPI/Swagger's "Authorize" button; the actual

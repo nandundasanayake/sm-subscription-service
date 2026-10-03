@@ -99,7 +99,8 @@ async function handleResponse<T>(res: Response): Promise<T> {
     if (res.status === 401 && typeof window !== 'undefined') {
       // Token missing/expired/rejected — clear it and send the admin back to login.
       clearAdminToken();
-      window.location.href = '/login';
+      // Full page load, so it must include the basePath ('/admin').
+      window.location.href = '/admin/login/';
     }
     let errMsg = `API error: ${res.status} ${res.statusText}`;
     try {
