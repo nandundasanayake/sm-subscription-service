@@ -121,6 +121,7 @@ class PackageCreate(BaseModel):
     features: Optional[List[str]] = Field(default=None, examples=[["Unlimited events", "Custom branding"]])
     limits: PackageLimits = Field(default_factory=PackageLimits)
     has_watermark: bool = Field(default=False, examples=[False])
+    watermark_logo_url: Optional[str] = Field(default=None, max_length=1024)
 
     class Config:
         json_schema_extra = {
@@ -151,6 +152,7 @@ class PackageUpdate(BaseModel):
     features: Optional[List[str]] = None
     limits: Optional[PackageLimits] = None
     has_watermark: Optional[bool] = None
+    watermark_logo_url: Optional[str] = Field(default=None, max_length=1024)
 
     class Config:
         json_schema_extra = {
@@ -215,9 +217,20 @@ class PackageResponse(BaseModel):
     features: Optional[List[str]] = None
     limits: PackageLimits = Field(default_factory=PackageLimits)
     has_watermark: bool = False
+    watermark_logo_url: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class WatermarkLogoUploadResponse(BaseModel):
+    """Response for POST /api/v1/admin/uploads/watermark-logo."""
+    url: str          # store this in Package.watermark_logo_url
+    preview_url: str  # short-lived presigned URL for showing it in the UI
+
+
+class WatermarkLogoPreviewResponse(BaseModel):
+    preview_url: str
 
 
 class PaymentResponse(BaseModel):

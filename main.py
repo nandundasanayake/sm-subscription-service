@@ -34,6 +34,7 @@ def seed_database():
                 "price": 0.00,
                 "billing_cycle": BillingCycle.MONTHLY,
                 "features": ["1 event per month", "Up to 50 photos per event", "Basic face matching"],
+                "has_watermark": True,
                 "limits": {
                     "photographer_limits": {
                         "max_events": 1,

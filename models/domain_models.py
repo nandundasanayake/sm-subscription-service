@@ -67,6 +67,10 @@ class Package(Base):
     # bottom-right watermark onto the display copy of every photo (the
     # original used for face recognition is left untouched).
     has_watermark = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Optional per-package logo for that watermark (S3 URL under
+    # packages/watermarks/, uploaded via the admin UI). Null means the
+    # ingestion worker's default logo / text watermark is used.
+    watermark_logo_url = Column(String(1024), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

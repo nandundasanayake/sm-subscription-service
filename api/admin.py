@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from jose import jwt
 from sqlalchemy.orm import Session, joinedload
 
@@ -22,7 +22,10 @@ from schemas import (
     SubscriptionStatusUpdate,
     SubscriptionResponse,
     TokenResponse,
+    WatermarkLogoPreviewResponse,
+    WatermarkLogoUploadResponse,
 )
+from services.s3 import MAX_WATERMARK_LOGO_BYTES, detect_image_type, s3_service
 from api.dependencies import JWT_ALGORITHM, JWT_SECRET, require_admin
 
 
@@ -266,6 +269,7 @@ def get_all_packages(
 )
 def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
     """Insert a new package into the database."""
+    _validate_watermark_logo_url(payload.watermark_logo_url)
     new_package = Package(
         app_id=payload.app_id,
         name=payload.name,
@@ -274,11 +278,65 @@ def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
         features=payload.features,
         limits=payload.limits.model_dump(),
         has_watermark=payload.has_watermark,
+        watermark_logo_url=payload.watermark_logo_url,
     )
     db.add(new_package)
     db.commit()
     db.refresh(new_package)
     return new_package
+
+
+def _validate_watermark_logo_url(url: Optional[str]) -> None:
+    """Only logos uploaded through /uploads/watermark-logo are accepted —
+    the ingestion worker downloads this URL, so it must not point at an
+    arbitrary host."""
+    if url and not s3_service.watermark_logo_key(url):
+        raise HTTPException(
+            status_code=422,
+            detail="watermark_logo_url must be a logo uploaded via /api/v1/admin/uploads/watermark-logo",
+        )
+
+
+def _require_s3() -> None:
+    if not s3_service.configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="S3 is not configured (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / S3_BUCKET_NAME)",
+        )
+
+
+@router.post(
+    "/uploads/watermark-logo",
+    response_model=WatermarkLogoUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a package watermark logo",
+)
+async def upload_watermark_logo(file: UploadFile = File(...)):
+    """Store a PNG / JPEG / WEBP logo (max 2 MB; transparent PNG recommended)
+    in S3 and return the URL to save as a package's `watermark_logo_url`."""
+    _require_s3()
+    data = await file.read(MAX_WATERMARK_LOGO_BYTES + 1)
+    if len(data) > MAX_WATERMARK_LOGO_BYTES:
+        raise HTTPException(status_code=413, detail="Logo must be 2 MB or smaller")
+    image_type = detect_image_type(data)
+    if not image_type:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Logo must be a PNG, JPEG or WEBP image")
+    ext, content_type = image_type
+    url = s3_service.upload_watermark_logo(data, ext, content_type)
+    return WatermarkLogoUploadResponse(url=url, preview_url=s3_service.presign(s3_service.watermark_logo_key(url)))
+
+
+@router.get(
+    "/uploads/watermark-logo/preview",
+    response_model=WatermarkLogoPreviewResponse,
+    summary="Presigned preview URL for a stored watermark logo",
+)
+def preview_watermark_logo(url: str = Query(...)):
+    _require_s3()
+    key = s3_service.watermark_logo_key(url)
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a watermark logo URL")
+    return WatermarkLogoPreviewResponse(preview_url=s3_service.presign(key))
 
 
 @router.put(
@@ -300,6 +358,7 @@ def update_package(
         )
 
     update_data = payload.model_dump(exclude_unset=True)
+    _validate_watermark_logo_url(update_data.get("watermark_logo_url"))
     for field, value in update_data.items():
         setattr(package, field, value)
 
