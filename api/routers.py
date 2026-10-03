@@ -113,6 +113,16 @@ def initiate_checkout(
         )
 
     repo = SubscriptionRepository(db)
+    # Buying the plan you already have would, once paid, cancel the
+    # subscription you just bought (only one plan stays active) — refuse it
+    # up front instead. Switching to a different package is allowed.
+    active = repo.get_active_by_user_id(user_id)
+    if active and active.package_id == package.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already have an active subscription to this package.",
+        )
+
     subscription = repo.create_pending_subscription(
         user_id=user_id,
         package_id=payload.package_id,

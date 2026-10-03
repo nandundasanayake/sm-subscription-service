@@ -26,6 +26,7 @@ from schemas import (
     WatermarkLogoUploadResponse,
 )
 from services.s3 import MAX_WATERMARK_LOGO_BYTES, detect_image_type, s3_service
+from repositories.sub_repository import SubscriptionRepository
 from api.dependencies import JWT_ALGORITHM, JWT_SECRET, require_admin
 
 
@@ -464,6 +465,9 @@ def update_subscription_status(
             detail=f"Subscription '{subscription_id}' not found",
         )
 
+    if payload.status == SubscriptionStatus.ACTIVE:
+        # Same one-active-plan rule as payment activation.
+        SubscriptionRepository(db).cancel_other_active_subscriptions(subscription)
     subscription.status = payload.status
     db.commit()
     db.refresh(subscription)

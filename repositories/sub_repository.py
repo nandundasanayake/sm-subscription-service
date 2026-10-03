@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
@@ -11,6 +12,8 @@ from models.domain_models import (
     Subscription,
     SubscriptionStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 # Simplified fixed-length periods for the dummy payment flow — good enough
 # for testing checkout end-to-end; a real provider integration would rely on
@@ -78,6 +81,41 @@ class SubscriptionRepository:
 
     # ── Update ─────────────────────────────────────────────────────────────
 
+    def cancel_other_active_subscriptions(self, subscription: Subscription) -> List[Subscription]:
+        """A user has at most one ACTIVE subscription: call this whenever
+        `subscription` is about to become ACTIVE, in the same transaction.
+        Every *other* ACTIVE subscription of the same user is CANCELLED;
+        `subscription` itself is never touched, so retrying an activation
+        (webhook redelivery, admin re-saving ACTIVE) can't cancel the plan
+        being activated. Does not commit."""
+        # Lock all of this user's subscription rows first (SELECT ... FOR
+        # UPDATE; a no-op on SQLite) so concurrent activations for the same
+        # user run one after another: the later one then sees — and cancels —
+        # the earlier one, instead of both ending up ACTIVE.
+        (
+            self.db.query(Subscription.id)
+            .filter(Subscription.user_id == subscription.user_id)
+            .with_for_update()
+            .all()
+        )
+        others = (
+            self.db.query(Subscription)
+            .populate_existing()  # re-read: another transaction may have just committed
+            .filter(
+                Subscription.user_id == subscription.user_id,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+                Subscription.id != subscription.id,
+            )
+            .all()
+        )
+        for other in others:
+            other.status = SubscriptionStatus.CANCELLED
+            logger.info(
+                f"Cancelled subscription {other.id} for user {other.user_id}: "
+                f"superseded by {subscription.id}"
+            )
+        return others
+
     def update_status(
         self, subscription_id: UUID, new_status: SubscriptionStatus
     ) -> Optional[Subscription]:
@@ -86,6 +124,8 @@ class SubscriptionRepository:
             Subscription.id == subscription_id
         ).first()
         if subscription:
+            if new_status == SubscriptionStatus.ACTIVE:
+                self.cancel_other_active_subscriptions(subscription)
             subscription.status = new_status
             self.db.commit()
             self.db.refresh(subscription)
@@ -132,6 +172,8 @@ class SubscriptionRepository:
         period_length = _BILLING_PERIOD_BY_CYCLE[subscription.package.billing_cycle]
         now = datetime.utcnow()
 
+        # An upgrade (or any new purchase) replaces the user's current plan.
+        self.cancel_other_active_subscriptions(subscription)
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.current_period_start = now
         subscription.current_period_end = now + period_length
