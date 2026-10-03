@@ -120,6 +120,8 @@ class PackageCreate(BaseModel):
     billing_cycle: BillingCycle = Field(default=BillingCycle.MONTHLY, examples=["monthly"])
     features: Optional[List[str]] = Field(default=None, examples=[["Unlimited events", "Custom branding"]])
     limits: PackageLimits = Field(default_factory=PackageLimits)
+    has_watermark: bool = Field(default=False, examples=[False])
+    watermark_logo_url: Optional[str] = Field(default=None, max_length=1024)
 
     class Config:
         json_schema_extra = {
@@ -149,6 +151,8 @@ class PackageUpdate(BaseModel):
     billing_cycle: Optional[BillingCycle] = None
     features: Optional[List[str]] = None
     limits: Optional[PackageLimits] = None
+    has_watermark: Optional[bool] = None
+    watermark_logo_url: Optional[str] = Field(default=None, max_length=1024)
 
     class Config:
         json_schema_extra = {
@@ -212,9 +216,21 @@ class PackageResponse(BaseModel):
     billing_cycle: BillingCycle
     features: Optional[List[str]] = None
     limits: PackageLimits = Field(default_factory=PackageLimits)
+    has_watermark: bool = False
+    watermark_logo_url: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class WatermarkLogoUploadResponse(BaseModel):
+    """Response for POST /api/v1/admin/uploads/watermark-logo."""
+    url: str          # store this in Package.watermark_logo_url
+    preview_url: str  # short-lived presigned URL for showing it in the UI
+
+
+class WatermarkLogoPreviewResponse(BaseModel):
+    preview_url: str
 
 
 class PaymentResponse(BaseModel):
@@ -240,6 +256,10 @@ class SubscriptionResponse(BaseModel):
     updated_at: datetime
     package: Optional[PackageResponse] = None
     payments: Optional[List[PaymentResponse]] = None
+    # True only for the synthesized Free-tier subscription (no DB row, no
+    # billing period, created_at = "now"), so consumers don't mistake its
+    # timestamps for a real subscription start.
+    is_virtual: bool = False
 
     class Config:
         from_attributes = True

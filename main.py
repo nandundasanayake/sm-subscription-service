@@ -34,6 +34,7 @@ def seed_database():
                 "price": 0.00,
                 "billing_cycle": BillingCycle.MONTHLY,
                 "features": ["1 event per month", "Up to 50 photos per event", "Basic face matching"],
+                "has_watermark": True,
                 "limits": {
                     "photographer_limits": {
                         "max_events": 1,
@@ -123,7 +124,6 @@ app.include_router(webhook_router)  # unauthenticated: called by the payment gat
 
 
 # ── Static Admin UI Mount ──────────────────────────────────────────────────────
-import os
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 

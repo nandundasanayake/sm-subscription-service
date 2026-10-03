@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from jose import jwt
 from sqlalchemy.orm import Session, joinedload
 
@@ -22,7 +22,11 @@ from schemas import (
     SubscriptionStatusUpdate,
     SubscriptionResponse,
     TokenResponse,
+    WatermarkLogoPreviewResponse,
+    WatermarkLogoUploadResponse,
 )
+from services.s3 import MAX_WATERMARK_LOGO_BYTES, detect_image_type, s3_service
+from repositories.sub_repository import SubscriptionRepository
 from api.dependencies import JWT_ALGORITHM, JWT_SECRET, require_admin
 
 
@@ -43,10 +47,11 @@ class PageParams:
     def offset(self) -> int:
         return (self.page - 1) * self.size
 
-# Stopgap single-account admin login — not a real user/role system.
-# INSECURE DEFAULTS, must be overridden via .env before any shared deployment.
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# Stopgap single-account admin login — not a real user/role system. No
+# defaults: if ADMIN_USERNAME / ADMIN_PASSWORD aren't set, admin login is
+# disabled rather than falling back to well-known credentials.
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_TOKEN_EXPIRE_MINUTES = int(os.getenv("ADMIN_TOKEN_EXPIRE_MINUTES", "480"))
 
 # Unauthenticated: this is where an admin token is obtained in the first place.
@@ -67,8 +72,14 @@ router = APIRouter(
 )
 def admin_login(payload: AdminLoginRequest):
     """Exchange admin username/password for a JWT carrying admin claims."""
-    valid_username = secrets_module.compare_digest(payload.username, ADMIN_USERNAME)
-    valid_password = secrets_module.compare_digest(payload.password, ADMIN_PASSWORD)
+    if not (ADMIN_USERNAME and ADMIN_PASSWORD):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin login is not configured.",
+        )
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    valid_username = secrets_module.compare_digest(payload.username.encode(), ADMIN_USERNAME.encode())
+    valid_password = secrets_module.compare_digest(payload.password.encode(), ADMIN_PASSWORD.encode())
     if not (valid_username and valid_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -266,6 +277,7 @@ def get_all_packages(
 )
 def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
     """Insert a new package into the database."""
+    _validate_watermark_logo_url(payload.watermark_logo_url)
     new_package = Package(
         app_id=payload.app_id,
         name=payload.name,
@@ -273,11 +285,66 @@ def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
         billing_cycle=payload.billing_cycle,
         features=payload.features,
         limits=payload.limits.model_dump(),
+        has_watermark=payload.has_watermark,
+        watermark_logo_url=payload.watermark_logo_url,
     )
     db.add(new_package)
     db.commit()
     db.refresh(new_package)
     return new_package
+
+
+def _validate_watermark_logo_url(url: Optional[str]) -> None:
+    """Only logos uploaded through /uploads/watermark-logo are accepted —
+    the ingestion worker downloads this URL, so it must not point at an
+    arbitrary host."""
+    if url and not s3_service.watermark_logo_key(url):
+        raise HTTPException(
+            status_code=422,
+            detail="watermark_logo_url must be a logo uploaded via /api/v1/admin/uploads/watermark-logo",
+        )
+
+
+def _require_s3() -> None:
+    if not s3_service.configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="S3 is not configured (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / S3_BUCKET_NAME)",
+        )
+
+
+@router.post(
+    "/uploads/watermark-logo",
+    response_model=WatermarkLogoUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a package watermark logo",
+)
+async def upload_watermark_logo(file: UploadFile = File(...)):
+    """Store a PNG / JPEG / WEBP logo (max 2 MB; transparent PNG recommended)
+    in S3 and return the URL to save as a package's `watermark_logo_url`."""
+    _require_s3()
+    data = await file.read(MAX_WATERMARK_LOGO_BYTES + 1)
+    if len(data) > MAX_WATERMARK_LOGO_BYTES:
+        raise HTTPException(status_code=413, detail="Logo must be 2 MB or smaller")
+    image_type = detect_image_type(data)
+    if not image_type:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Logo must be a PNG, JPEG or WEBP image")
+    ext, content_type = image_type
+    url = s3_service.upload_watermark_logo(data, ext, content_type)
+    return WatermarkLogoUploadResponse(url=url, preview_url=s3_service.presign(s3_service.watermark_logo_key(url)))
+
+
+@router.get(
+    "/uploads/watermark-logo/preview",
+    response_model=WatermarkLogoPreviewResponse,
+    summary="Presigned preview URL for a stored watermark logo",
+)
+def preview_watermark_logo(url: str = Query(...)):
+    _require_s3()
+    key = s3_service.watermark_logo_key(url)
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a watermark logo URL")
+    return WatermarkLogoPreviewResponse(preview_url=s3_service.presign(key))
 
 
 @router.put(
@@ -299,6 +366,7 @@ def update_package(
         )
 
     update_data = payload.model_dump(exclude_unset=True)
+    _validate_watermark_logo_url(update_data.get("watermark_logo_url"))
     for field, value in update_data.items():
         setattr(package, field, value)
 
@@ -397,6 +465,9 @@ def update_subscription_status(
             detail=f"Subscription '{subscription_id}' not found",
         )
 
+    if payload.status == SubscriptionStatus.ACTIVE:
+        # Same one-active-plan rule as payment activation.
+        SubscriptionRepository(db).cancel_other_active_subscriptions(subscription)
     subscription.status = payload.status
     db.commit()
     db.refresh(subscription)

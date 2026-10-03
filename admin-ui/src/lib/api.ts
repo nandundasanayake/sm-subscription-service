@@ -50,6 +50,8 @@ export interface AdminPackage {
   billing_cycle: string;
   features?: string[] | null;
   limits?: PackageLimits | null;
+  has_watermark?: boolean;
+  watermark_logo_url?: string | null;
   created_at?: string;
   updated_at?: string | null;
 }
@@ -61,6 +63,8 @@ export interface PackageInput {
   billing_cycle: string;
   features?: string[];
   limits?: PackageLimits;
+  has_watermark?: boolean;
+  watermark_logo_url?: string | null;
 }
 
 export interface AdminSubscription {
@@ -95,7 +99,8 @@ async function handleResponse<T>(res: Response): Promise<T> {
     if (res.status === 401 && typeof window !== 'undefined') {
       // Token missing/expired/rejected — clear it and send the admin back to login.
       clearAdminToken();
-      window.location.href = '/login';
+      // Full page load, so it must include the basePath ('/admin').
+      window.location.href = '/admin/login/';
     }
     let errMsg = `API error: ${res.status} ${res.statusText}`;
     try {
@@ -166,6 +171,32 @@ export async function fetchAdminPackages(
     headers: authHeaders(),
   });
   return handleResponse<PaginatedResponse<AdminPackage>>(res);
+}
+
+// ── Watermark logos ──────────────────────────────────────────
+// Uploads go to the private S3 bucket; `url` is what gets saved on the
+// package, `preview_url` is a short-lived presigned link for display only.
+export interface WatermarkLogoUpload {
+  url: string;
+  preview_url: string;
+}
+
+export async function uploadWatermarkLogo(file: File): Promise<WatermarkLogoUpload> {
+  const body = new FormData();
+  body.append('file', file);
+  const res = await fetch(`${BASE_URL}/uploads/watermark-logo`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body,
+  });
+  return handleResponse<WatermarkLogoUpload>(res);
+}
+
+export async function fetchWatermarkLogoPreview(url: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/uploads/watermark-logo/preview${buildQuery({ url })}`, {
+    headers: authHeaders(),
+  });
+  return (await handleResponse<{ preview_url: string }>(res)).preview_url;
 }
 
 export async function createAdminPackage(input: PackageInput): Promise<AdminPackage> {
