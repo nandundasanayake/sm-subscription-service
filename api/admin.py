@@ -273,6 +273,7 @@ def create_package(payload: PackageCreate, db: Session = Depends(get_db)):
         billing_cycle=payload.billing_cycle,
         features=payload.features,
         limits=payload.limits.model_dump(),
+        has_watermark=payload.has_watermark,
     )
     db.add(new_package)
     db.commit()

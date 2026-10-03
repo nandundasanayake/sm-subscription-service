@@ -120,6 +120,7 @@ class PackageCreate(BaseModel):
     billing_cycle: BillingCycle = Field(default=BillingCycle.MONTHLY, examples=["monthly"])
     features: Optional[List[str]] = Field(default=None, examples=[["Unlimited events", "Custom branding"]])
     limits: PackageLimits = Field(default_factory=PackageLimits)
+    has_watermark: bool = Field(default=False, examples=[False])
 
     class Config:
         json_schema_extra = {
@@ -149,6 +150,7 @@ class PackageUpdate(BaseModel):
     billing_cycle: Optional[BillingCycle] = None
     features: Optional[List[str]] = None
     limits: Optional[PackageLimits] = None
+    has_watermark: Optional[bool] = None
 
     class Config:
         json_schema_extra = {
@@ -212,6 +214,7 @@ class PackageResponse(BaseModel):
     billing_cycle: BillingCycle
     features: Optional[List[str]] = None
     limits: PackageLimits = Field(default_factory=PackageLimits)
+    has_watermark: bool = False
 
     class Config:
         from_attributes = True

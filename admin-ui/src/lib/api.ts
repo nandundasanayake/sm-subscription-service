@@ -50,6 +50,7 @@ export interface AdminPackage {
   billing_cycle: string;
   features?: string[] | null;
   limits?: PackageLimits | null;
+  has_watermark?: boolean;
   created_at?: string;
   updated_at?: string | null;
 }
@@ -61,6 +62,7 @@ export interface PackageInput {
   billing_cycle: string;
   features?: string[];
   limits?: PackageLimits;
+  has_watermark?: boolean;
 }
 
 export interface AdminSubscription {

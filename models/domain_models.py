@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Float, DateTime, ForeignKey, Text, JSON, Enum as SAEnum
+    Column, String, Float, DateTime, ForeignKey, Text, JSON, Boolean, Enum as SAEnum
 )
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship
@@ -62,6 +62,11 @@ class Package(Base):
     #  "max_photos_per_event": int|null, "event_link_expiry_days": int|null}}
     # null or -1 in any of those fields means "unlimited".
     limits = Column(JSON, nullable=False, default=dict)
+    # Free-tier style branding: when true, events created under this package
+    # are flagged `is_watermarked` and the ingestion worker stamps a
+    # bottom-right watermark onto the display copy of every photo (the
+    # original used for face recognition is left untouched).
+    has_watermark = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
